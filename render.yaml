@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: hexalog-capi-service
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_PAGE_ACCESS_TOKEN
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: META_PIXEL_ID
+        sync: false
+      - key: FRESHSALES_API_KEY
+        sync: false
+      - key: FRESHSALES_DOMAIN
+        sync: false
+      - key: FRESHSALES_WEBHOOK_SECRET
+        sync: false
+      - key: FRESHSALES_META_LEAD_FIELD
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: ALERT_CHANNEL
+        value: slack
+      - key: DEBUG_LOG_PII
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: MAX_HTTP_ATTEMPTS
+        value: "3"
+      - key: MATCH_RETRY_ATTEMPTS
+        value: "3"
+      - key: MATCH_RETRY_MIN_SECONDS
+        value: "5"
+      - key: MATCH_RETRY_MAX_SECONDS
+        value: "10"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "60"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hexalog-capi-db
+          property: connectionString
+
+databases:
+  - name: hexalog-capi-db
+    plan: free
+    databaseName: hexalog_capi
+    user: hexalog
