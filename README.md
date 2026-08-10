@@ -35,7 +35,7 @@ All secrets come from environment variables. Do not commit `.env`.
 - `META_APP_SECRET`
 - `META_PAGE_ACCESS_TOKEN`
 - `META_PIXEL_ID`
-- `FRESHSALES_DOMAIN`
+- `FRESHSALES_DOMAIN`: full Freshsales URL including scheme, for example `https://yourdomain.myfreshworks.com`
 - `FRESHSALES_API_KEY`
 - `FRESHSALES_WEBHOOK_SECRET`
 - `FRESHSALES_META_LEAD_FIELD`
