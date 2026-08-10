@@ -30,7 +30,7 @@ For Railway, the included `Procfile` respects `$PORT`.
 
 All secrets come from environment variables. Do not commit `.env`.
 
-- `DATABASE_URL`: async SQLAlchemy URL, for example `sqlite+aiosqlite:///./freshsales_capi.db` or PostgreSQL via `postgresql+asyncpg://...`
+- `DATABASE_URL`: async SQLAlchemy URL, for example `sqlite+aiosqlite:///./freshsales_capi.db` or PostgreSQL via `postgresql+asyncpg://...`. Render-managed `postgres://` and `postgresql://` URLs are normalized to `postgresql+asyncpg://` at startup.
 - `META_VERIFY_TOKEN`
 - `META_APP_SECRET`
 - `META_PAGE_ACCESS_TOKEN`
