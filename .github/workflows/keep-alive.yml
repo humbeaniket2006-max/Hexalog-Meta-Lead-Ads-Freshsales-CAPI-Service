@@ -2,7 +2,7 @@ name: Keep Render Awake
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *"  # every 10 minutes
   workflow_dispatch:
 
 jobs:
@@ -10,4 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping health endpoint
-        run: curl -sf "${{ secrets.RENDER_SERVICE_URL }}/health" || echo "Ping failed"
+        run: |
+          for i in 1 2 3; do
+            if curl -sf --max-time 30 "https://hexalog-capi-service.onrender.com/health"; then
+              echo "Ping succeeded"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
+          echo "All attempts failed"
+          exit 1
