@@ -59,3 +59,18 @@ class MetaLeadgenWebhookPayload(BaseModel):
         if value != "page":
             raise ValueError("unsupported Meta object")
         return value
+
+
+class MetaLeadFieldData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    values: list[str] = Field(default_factory=list, max_length=20)
+
+
+class MetaGraphLeadPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = Field(default=None, max_length=80)
+    created_time: str | None = Field(default=None, max_length=80)
+    field_data: list[MetaLeadFieldData] = Field(default_factory=list, max_length=100)

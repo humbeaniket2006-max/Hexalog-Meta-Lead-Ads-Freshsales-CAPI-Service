@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     debug_log_pii: bool = False
     log_level: str = "INFO"
 
+    meta_to_freshsales_field_mapping: dict[str, str] = {
+        "full_name": "first_name",
+        "email": "email",
+        "phone_number": "mobile_number",
+        "phone": "mobile_number",
+    }
+
     event_mapping: dict[str, str] = {
         "CC Qualified": "Qualified",
         "Future Prospect": "Qualified",

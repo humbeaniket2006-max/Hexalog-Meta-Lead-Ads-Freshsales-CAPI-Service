@@ -1,11 +1,13 @@
 # Hexalog Freshsales CAPI Service
 
-Production FastAPI service replacing the LeadsBridge-style connector between Meta Lead Ads and Freshsales.
+Production FastAPI service replacing the LeadsBridge-style connector between Meta Lead Ads and Freshsales. Once verified in production, disable the native Freshsales-Meta connector so this service is the sole path for Meta leads entering Freshsales.
 
 ## Flows
 
-- Meta Lead Ads webhook captures `leadgen_id`, fetches lead payload from Meta Graph API, matches Freshsales by email or phone, and writes the configured Freshsales custom field.
+- Meta Lead Ads webhook captures `leadgen_id`, fetches the full lead payload from Meta Graph API, searches Freshsales by email then phone, and either creates a new Lead or updates an existing Lead without overwriting populated fields. The configured Freshsales custom field is populated with the Meta `leadgen_id`.
 - Freshsales status webhook validates a shared secret, confirms the record exists in local state, fetches the full Freshsales record, maps the status to a Meta CRM CAPI event, and sends it with `lead_id`.
+
+Meta lead field mapping is configured in `app/config.py` through `meta_to_freshsales_field_mapping`. The default maps `full_name`, `email`, `phone_number`, and `phone`; extend that mapping when Instant Forms add new custom questions.
 
 Status mapping:
 
@@ -48,7 +50,7 @@ All secrets come from environment variables. Do not commit `.env`.
 - `RATE_LIMIT_PER_MINUTE`
 - `DEBUG_LOG_PII`: defaults false
 
-Use a least-privilege Freshsales token with only read lead/deal and write custom field permissions.
+Use a least-privilege Freshsales token with only lead search, lead create, lead update, deal/lead read, and custom field write permissions needed by the enabled flows.
 
 ## Security Notes
 
@@ -66,4 +68,4 @@ python3 -m pytest -q
 python3 -m pip_audit -r requirements.txt --disable-pip --no-deps
 ```
 
-Current local result: `10 passed`; `No known vulnerabilities found`.
+Current local result: `16 passed`; `No known vulnerabilities found`.
