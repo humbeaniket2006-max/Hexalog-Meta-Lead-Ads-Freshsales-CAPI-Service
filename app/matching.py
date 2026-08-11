@@ -38,12 +38,12 @@ async def match_with_backoff(
     correlation_id: str,
 ) -> dict[str, object] | None:
     for attempt in range(1, settings.match_retry_attempts + 1):
-        lead = await freshsales.find_lead_by_contact(email=email, phone=phone)
-        if lead is not None:
-            logger.info("lead_matched", correlation_id=correlation_id, attempt=attempt)
-            return lead
+        contact = await freshsales.find_contact_by_email_or_phone(email=email, phone=phone)
+        if contact is not None:
+            logger.info("contact_matched", correlation_id=correlation_id, attempt=attempt)
+            return contact
         logger.info(
-            "lead_match_miss",
+            "contact_match_miss",
             correlation_id=correlation_id,
             attempt=attempt,
             email_ref=pii_ref(email),

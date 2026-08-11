@@ -19,11 +19,11 @@ router = APIRouter(prefix="/webhooks/meta", tags=["meta"])
 logger = get_logger(__name__)
 
 
-class FreshsalesLeadCreateError(RuntimeError):
+class FreshsalesContactCreateError(RuntimeError):
     pass
 
 
-class FreshsalesLeadUpdateError(RuntimeError):
+class FreshsalesContactUpdateError(RuntimeError):
     pass
 
 
@@ -45,8 +45,8 @@ def split_full_name(full_name: str) -> tuple[str, str | None]:
     return parts[0], " ".join(parts[1:])
 
 
-def build_freshsales_lead_fields(meta_fields: dict[str, str], settings: Settings) -> dict[str, object]:
-    lead_fields: dict[str, object] = {}
+def build_freshsales_contact_fields(meta_fields: dict[str, str], settings: Settings) -> dict[str, object]:
+    contact_fields: dict[str, object] = {}
     custom_field: dict[str, object] = {}
     for meta_name, value in meta_fields.items():
         freshsales_name = settings.meta_to_freshsales_field_mapping.get(meta_name)
@@ -55,38 +55,38 @@ def build_freshsales_lead_fields(meta_fields: dict[str, str], settings: Settings
         if meta_name == "full_name":
             first_name, last_name = split_full_name(value)
             if first_name:
-                lead_fields[freshsales_name] = first_name
+                contact_fields[freshsales_name] = first_name
             if last_name:
-                lead_fields.setdefault("last_name", last_name)
+                contact_fields.setdefault("last_name", last_name)
             continue
         if freshsales_name.startswith("custom_field."):
             custom_field[freshsales_name.removeprefix("custom_field.")] = value
         else:
-            lead_fields[freshsales_name] = value
+            contact_fields[freshsales_name] = value
     if custom_field:
-        lead_fields["custom_field"] = custom_field
-    return lead_fields
+        contact_fields["custom_field"] = custom_field
+    return contact_fields
 
 
-def existing_value(lead: dict[str, object], field_name: str) -> object:
+def existing_value(record: dict[str, object], field_name: str) -> object:
     if field_name.startswith("custom_field."):
-        custom_field = lead.get("custom_field")
+        custom_field = record.get("custom_field")
         if isinstance(custom_field, dict):
             return custom_field.get(field_name.removeprefix("custom_field."))
         return None
-    return lead.get(field_name)
+    return record.get(field_name)
 
 
-def empty_only_fields(lead: dict[str, object], lead_fields: dict[str, object]) -> dict[str, object]:
+def empty_only_fields(record: dict[str, object], contact_fields: dict[str, object]) -> dict[str, object]:
     updates: dict[str, object] = {}
     custom_updates: dict[str, object] = {}
-    for field_name, value in lead_fields.items():
+    for field_name, value in contact_fields.items():
         if field_name == "custom_field" and isinstance(value, dict):
             for custom_name, custom_value in value.items():
-                if not existing_value(lead, f"custom_field.{custom_name}"):
+                if not existing_value(record, f"custom_field.{custom_name}"):
                     custom_updates[custom_name] = custom_value
             continue
-        if not existing_value(lead, field_name):
+        if not existing_value(record, field_name):
             updates[field_name] = value
     if custom_updates:
         updates["custom_field"] = custom_updates
@@ -145,30 +145,30 @@ async def receive_meta_leadgen(
                 meta_fields = extract_meta_fields(meta_lead)
                 email = meta_fields.get("email")
                 phone = meta_fields.get("phone_number") or meta_fields.get("phone")
-                lead_fields = build_freshsales_lead_fields(meta_fields, settings)
-                matched = await freshsales.find_lead_by_contact(email=email, phone=phone)
+                contact_fields = build_freshsales_contact_fields(meta_fields, settings)
+                matched = await freshsales.find_contact_by_email_or_phone(email=email, phone=phone)
                 if matched is None:
                     if not email and not phone:
                         logger.warning("meta_lead_low_confidence_create", correlation_id=correlation_id, leadgen_id=leadgen_id)
                     try:
-                        created = await freshsales.create_lead(lead_fields, leadgen_id)
+                        created = await freshsales.create_contact(contact_fields, leadgen_id)
                     except Exception as exc:
-                        raise FreshsalesLeadCreateError from exc
+                        raise FreshsalesContactCreateError from exc
                     record_id = str(created.get("id", ""))
                     if not record_id:
-                        raise FreshsalesLeadCreateError("Freshsales created lead missing id")
-                    logger.info("freshsales_lead_created", correlation_id=correlation_id, record_id=record_id)
+                        raise FreshsalesContactCreateError("Freshsales created contact missing id")
+                    logger.info("freshsales_contact_created", correlation_id=correlation_id, record_id=record_id)
                 else:
                     record_id = str(matched.get("id", ""))
                     if not record_id:
                         raise RuntimeError("Freshsales match missing id")
-                    update_fields = empty_only_fields(matched, lead_fields)
+                    update_fields = empty_only_fields(matched, contact_fields)
                     try:
-                        await freshsales.update_lead(record_id, update_fields, leadgen_id)
+                        await freshsales.update_contact(record_id, update_fields, leadgen_id)
                     except Exception as exc:
-                        raise FreshsalesLeadUpdateError from exc
-                    logger.info("freshsales_lead_updated_existing", correlation_id=correlation_id, record_id=record_id)
-                await repo.save_lead_state(leadgen_id, record_id)
+                        raise FreshsalesContactUpdateError from exc
+                    logger.info("freshsales_contact_updated_existing", correlation_id=correlation_id, record_id=record_id)
+                await repo.save_lead_state(leadgen_id, record_id, record_type="contact")
                 await repo.mark_dedupe_success(dedupe_key)
             except Exception as exc:
                 await repo.dead_letter(correlation_id, "meta_lead_capture", payload.model_dump(), type(exc).__name__, settings.max_http_attempts)

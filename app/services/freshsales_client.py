@@ -17,12 +17,12 @@ class FreshsalesClient:
     def base_url(self) -> str:
         return str(self.settings.freshsales_domain).rstrip("/")
 
-    async def search_leads_by_field(self, field_name: str, value: str) -> list[dict[str, object]]:
+    async def search_contacts_by_field(self, field_name: str, value: str) -> list[dict[str, object]]:
         params = {field_name: value}
 
         async def op() -> list[dict[str, object]]:
             response = await self.client.get(
-                f"{self.base_url}/api/leads/search",
+                f"{self.base_url}/api/contacts/search",
                 headers=self.headers,
                 params=params,
                 timeout=self.settings.http_timeout_seconds,
@@ -31,45 +31,45 @@ class FreshsalesClient:
                 return []
             response.raise_for_status()
             data = response.json()
-            leads = data.get("leads", []) if isinstance(data, dict) else []
-            return [lead for lead in leads if isinstance(lead, dict)]
+            contacts = data.get("contacts", []) if isinstance(data, dict) else []
+            return [contact for contact in contacts if isinstance(contact, dict)]
 
         return await retry_async(op, self.settings.max_http_attempts)
 
-    async def find_lead_by_contact(self, email: str | None, phone: str | None) -> dict[str, object] | None:
+    async def find_contact_by_email_or_phone(self, email: str | None, phone: str | None) -> dict[str, object] | None:
         if email:
-            email_matches = await self.search_leads_by_field("email", email)
+            email_matches = await self.search_contacts_by_field("email", email)
             if len(email_matches) == 1:
                 return email_matches[0]
         if phone:
-            phone_matches = await self.search_leads_by_field("phone", phone)
+            phone_matches = await self.search_contacts_by_field("mobile_number", phone)
             if len(phone_matches) == 1:
                 return phone_matches[0]
         return None
 
-    async def create_lead(self, lead_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
-        payload = {"lead": self._with_meta_lead_id(lead_fields, leadgen_id)}
+    async def create_contact(self, contact_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
+        payload = {"contact": self._with_meta_lead_id(contact_fields, leadgen_id)}
 
         async def op() -> dict[str, object]:
             response = await self.client.post(
-                f"{self.base_url}/api/leads",
+                f"{self.base_url}/api/contacts",
                 headers=self.headers,
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
             response.raise_for_status()
             data = response.json()
-            lead = data.get("lead", data) if isinstance(data, dict) else {}
-            return lead if isinstance(lead, dict) else {}
+            contact = data.get("contact", data) if isinstance(data, dict) else {}
+            return contact if isinstance(contact, dict) else {}
 
         return await retry_async(op, self.settings.max_http_attempts)
 
-    async def update_lead(self, record_id: str, lead_fields: dict[str, object], leadgen_id: str) -> None:
-        payload = {"lead": self._with_meta_lead_id(lead_fields, leadgen_id)}
+    async def update_contact(self, record_id: str, contact_fields: dict[str, object], leadgen_id: str) -> None:
+        payload = {"contact": self._with_meta_lead_id(contact_fields, leadgen_id)}
 
         async def op() -> None:
             response = await self.client.put(
-                f"{self.base_url}/api/leads/{record_id}",
+                f"{self.base_url}/api/contacts/{record_id}",
                 headers=self.headers,
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
@@ -79,11 +79,11 @@ class FreshsalesClient:
         await retry_async(op, self.settings.max_http_attempts)
 
     async def update_meta_lead_id(self, record_id: str, leadgen_id: str) -> None:
-        payload = {"lead": {"custom_field": {self.settings.freshsales_meta_lead_field: leadgen_id}}}
+        payload = {"contact": {"custom_field": {self.settings.freshsales_meta_lead_field: leadgen_id}}}
 
         async def op() -> None:
             response = await self.client.put(
-                f"{self.base_url}/api/leads/{record_id}",
+                f"{self.base_url}/api/contacts/{record_id}",
                 headers=self.headers,
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
@@ -103,7 +103,7 @@ class FreshsalesClient:
         return payload
 
     async def get_record(self, record_type: str, record_id: str) -> dict[str, object]:
-        endpoint = "leads" if record_type == "lead" else "deals"
+        endpoint = "contacts" if record_type == "contact" else "deals"
 
         async def op() -> dict[str, object]:
             response = await self.client.get(

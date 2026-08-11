@@ -40,7 +40,7 @@ class Repository:
         await self.session.execute(update(DedupeEvent).where(DedupeEvent.dedupe_key == key).values(status="failed"))
         await self.session.commit()
 
-    async def save_lead_state(self, leadgen_id: str, freshsales_record_id: str, record_type: str = "lead") -> None:
+    async def save_lead_state(self, leadgen_id: str, freshsales_record_id: str, record_type: str = "contact") -> None:
         stmt = insert(LeadState).values(
             leadgen_id=leadgen_id,
             freshsales_record_id=freshsales_record_id,

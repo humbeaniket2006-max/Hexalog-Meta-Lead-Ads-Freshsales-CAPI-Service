@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FreshsalesRecordType(StrEnum):
-    lead = "lead"
+    contact = "contact"
     deal = "deal"
 
 

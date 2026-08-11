@@ -26,7 +26,7 @@ async def test_match_retry_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def find_lead_by_contact(self, email: str | None, phone: str | None) -> dict[str, object] | None:
+        async def find_contact_by_email_or_phone(self, email: str | None, phone: str | None) -> dict[str, object] | None:
             self.calls += 1
             return {"id": "lead1"} if self.calls == 2 else None
 
