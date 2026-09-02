@@ -148,13 +148,24 @@ async def receive_meta_leadgen(
                     record_id = str(matched.get("id", ""))
                     if not record_id:
                         raise RuntimeError("Freshsales match missing id")
-                    logger.info(
-                        "duplicate_lead_skipped",
-                        correlation_id=correlation_id,
-                        leadgen_id=leadgen_id,
-                        mobile_number=phone,
-                        record_id=record_id,
-                    )
+                    try:
+                        await freshsales.update_meta_lead_id(record_id, leadgen_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "freshsales_matched_contact_update_failed",
+                            correlation_id=correlation_id,
+                            leadgen_id=leadgen_id,
+                            record_id=record_id,
+                            error=type(exc).__name__,
+                        )
+                    else:
+                        logger.info(
+                            "freshsales_matched_contact_updated",
+                            correlation_id=correlation_id,
+                            leadgen_id=leadgen_id,
+                            mobile_number=phone,
+                            record_id=record_id,
+                        )
                     await repo.save_lead_state(leadgen_id, record_id, record_type="contact")
                     await repo.mark_dedupe_success(dedupe_key)
                     continue
@@ -163,13 +174,30 @@ async def receive_meta_leadgen(
                 try:
                     created = await freshsales.create_contact(contact_fields, leadgen_id)
                 except DuplicateContactError as exc:
-                    logger.warning(
-                        "freshsales_duplicate_mobile_unresolved",
+                    logger.info(
+                        "freshsales_duplicate_mobile_detected",
                         correlation_id=correlation_id,
                         leadgen_id=leadgen_id,
                         object_id=exc.object_id,
                     )
-                    raise FreshsalesContactCreateError from exc
+                    try:
+                        await freshsales.update_meta_lead_id(exc.object_id, leadgen_id)
+                    except Exception as update_exc:
+                        logger.error(
+                            "freshsales_duplicate_update_failed",
+                            correlation_id=correlation_id,
+                            leadgen_id=leadgen_id,
+                            object_id=exc.object_id,
+                            error=type(update_exc).__name__,
+                        )
+                        raise FreshsalesContactCreateError from update_exc
+                    record_id = exc.object_id
+                    logger.info(
+                        "freshsales_duplicate_mobile_resolved",
+                        correlation_id=correlation_id,
+                        leadgen_id=leadgen_id,
+                        object_id=record_id,
+                    )
                 except Exception as exc:
                     if isinstance(exc, httpx.HTTPStatusError):
                         logger.error(

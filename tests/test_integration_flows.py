@@ -113,7 +113,7 @@ async def test_meta_duplicate_flow() -> None:
 
 
 @pytest.mark.asyncio
-async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
+async def test_meta_duplicate_mobile_lookup_updates_meta_id_without_create() -> None:
     body = meta_webhook_body("l-mobile-dup")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -157,7 +157,7 @@ async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 0, "lookup": 2, "update": 0}
+            assert calls == {"create": 0, "lookup": 2, "update": 1}
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ async def test_meta_duplicate_mobile_create_safety_net_updates_meta_id() -> None
 
 
 @pytest.mark.asyncio
-async def test_meta_existing_lead_by_email_skips_without_create() -> None:
+async def test_meta_existing_lead_by_email_updates_meta_id_without_create() -> None:
     body = meta_webhook_body("l-email")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -233,11 +233,11 @@ async def test_meta_existing_lead_by_email_skips_without_create() -> None:
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 0, "update": 0}
+            assert calls == {"create": 0, "update": 1}
 
 
 @pytest.mark.asyncio
-async def test_meta_existing_lead_by_phone_skips_without_create() -> None:
+async def test_meta_existing_lead_by_phone_updates_meta_id_without_create() -> None:
     body = meta_webhook_body("l-phone")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -261,7 +261,7 @@ async def test_meta_existing_lead_by_phone_skips_without_create() -> None:
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 0, "update": 0}
+            assert calls == {"create": 0, "update": 1}
             assert any("q=123" in url and "f=contacts" in url and "entities=contact" in url for url in searched)
 
 
