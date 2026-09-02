@@ -256,12 +256,23 @@ async def test_freshsales_duplicate_flow() -> None:
             async with app.state.sessionmaker() as session:
                 await Repository(session).save_lead_state("l1", "lead1")
             calls = {"capi": 0}
+            capi_payload: dict[str, object] = {}
 
             async def handler(request):
                 if request.url.path.endswith("/api/contacts/lead1"):
-                    return Response(200, json={"contact": {"custom_field": {settings.freshsales_meta_lead_field: "l1"}}})
+                    return Response(
+                        200,
+                        json={
+                            "contact": {
+                                "email": "Ada@Example.COM ",
+                                "mobile_number": "+91 93071-52210",
+                                "custom_field": {settings.freshsales_meta_lead_field: "l1"},
+                            }
+                        },
+                    )
                 if "graph.facebook.com" in str(request.url) and request.method == "POST":
                     calls["capi"] += 1
+                    capi_payload.update(json.loads(request.content))
                     return Response(200, json={"events_received": 1})
                 return Response(200, json={})
 
@@ -270,3 +281,8 @@ async def test_freshsales_duplicate_flow() -> None:
             assert (await client.post("/webhooks/freshsales/status", json=body, headers=headers)).status_code == 200
             assert (await client.post("/webhooks/freshsales/status", json=body, headers=headers)).status_code == 200
             assert calls["capi"] == 1
+            event = capi_payload["data"][0]  # type: ignore[index]
+            assert event["event_id"] == "freshsales_status:lead1:CC Qualified:202608101000"  # type: ignore[index]
+            assert event["user_data"]["lead_id"] == "l1"  # type: ignore[index]
+            assert event["user_data"]["em"] == [hashlib.sha256("ada@example.com".encode()).hexdigest()]  # type: ignore[index]
+            assert event["user_data"]["ph"] == [hashlib.sha256("919307152210".encode()).hexdigest()]  # type: ignore[index]

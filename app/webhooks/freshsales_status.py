@@ -18,6 +18,41 @@ router = APIRouter(prefix="/webhooks/freshsales", tags=["freshsales"])
 logger = get_logger(__name__)
 
 
+def contact_identity_from_envelope(envelope: dict[str, object]) -> tuple[str | None, str | None]:
+    email = _direct_string_value(envelope, {"email"})
+    phone = _direct_string_value(envelope, {"mobile_number", "mobile", "phone_number", "phone", "work_number"})
+    contact_values = [value for key, value in envelope.items() if "contact" in key.lower()]
+    if email is None:
+        email = _first_string_value(contact_values, {"email"})
+    if phone is None:
+        phone = _first_string_value(contact_values, {"mobile_number", "mobile", "phone_number", "phone", "work_number"})
+    return email, phone
+
+
+def _direct_string_value(record: dict[str, object], keys: set[str]) -> str | None:
+    for key, value in record.items():
+        if key in keys and isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _first_string_value(value: object, keys: set[str]) -> str | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in keys and isinstance(item, str) and item.strip():
+                return item
+        for item in value.values():
+            found = _first_string_value(item, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _first_string_value(item, keys)
+            if found:
+                return found
+    return None
+
+
 @router.post("/status")
 async def receive_freshsales_status(
     request: Request,
@@ -65,9 +100,24 @@ async def receive_freshsales_status(
         event_name = settings.event_mapping[payload.status.value]
         value = float(envelope.get("amount", 0.0)) if payload.status.value == "Won" else None
         currency = str(envelope.get("currency", "USD")) if payload.status.value == "Won" else None
-        await meta_capi.send_crm_event(event_name, lead_id, value, currency)
+        email, phone = contact_identity_from_envelope(envelope)
+        response = await meta_capi.send_crm_event(
+            event_name,
+            lead_id,
+            dedupe_key,
+            value,
+            currency,
+            email=email,
+            phone=phone,
+        )
         await repo.mark_dedupe_success(dedupe_key)
-        logger.info("meta_capi_confirmed", correlation_id=correlation_id, event_name=event_name, lead_id=lead_id)
+        logger.info(
+            "meta_capi_confirmed",
+            correlation_id=correlation_id,
+            event_name=event_name,
+            lead_id=lead_id,
+            events_received=response.get("events_received") if isinstance(response, dict) else None,
+        )
         return {"status": "ok"}
     except Exception as exc:
         await repo.dead_letter(correlation_id, "freshsales_status", payload.model_dump(), type(exc).__name__, settings.max_http_attempts)
