@@ -174,30 +174,13 @@ async def receive_meta_leadgen(
                 try:
                     created = await freshsales.create_contact(contact_fields, leadgen_id)
                 except DuplicateContactError as exc:
-                    logger.info(
-                        "freshsales_duplicate_mobile_detected",
+                    logger.warning(
+                        "freshsales_duplicate_mobile_unresolved",
                         correlation_id=correlation_id,
                         leadgen_id=leadgen_id,
                         object_id=exc.object_id,
                     )
-                    try:
-                        await freshsales.update_meta_lead_id(exc.object_id, leadgen_id)
-                    except Exception as update_exc:
-                        logger.error(
-                            "freshsales_duplicate_update_failed",
-                            correlation_id=correlation_id,
-                            leadgen_id=leadgen_id,
-                            object_id=exc.object_id,
-                            error=type(update_exc).__name__,
-                        )
-                        raise FreshsalesContactCreateError from update_exc
-                    record_id = exc.object_id
-                    logger.info(
-                        "freshsales_duplicate_mobile_resolved",
-                        correlation_id=correlation_id,
-                        leadgen_id=leadgen_id,
-                        object_id=record_id,
-                    )
+                    raise FreshsalesContactCreateError from exc
                 except Exception as exc:
                     if isinstance(exc, httpx.HTTPStatusError):
                         logger.error(
