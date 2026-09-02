@@ -55,10 +55,6 @@ class FreshsalesClient:
             email_matches = await self.search_contacts_by_field("email", email)
             if email_matches:
                 return email_matches[0]
-        if phone:
-            phone_matches = await self.search_contacts_by_field("mobile_number", phone)
-            if phone_matches:
-                return phone_matches[0]
         return None
 
     async def create_contact(self, contact_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
