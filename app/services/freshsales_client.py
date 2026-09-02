@@ -1,3 +1,5 @@
+import sys
+
 import httpx
 
 from app.config import Settings
@@ -57,6 +59,13 @@ class FreshsalesClient:
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
+            if response.status_code >= 400:
+                print(
+                    f"FRESHSALES_CREATE_CONTACT_ERROR status={response.status_code} "
+                    f"body={response.text} payload={payload}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             response.raise_for_status()
             data = response.json()
             contact = data.get("contact", data) if isinstance(data, dict) else {}
@@ -74,6 +83,13 @@ class FreshsalesClient:
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
+            if response.status_code >= 400:
+                print(
+                    f"FRESHSALES_UPDATE_CONTACT_ERROR status={response.status_code} "
+                    f"body={response.text} payload={payload}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             response.raise_for_status()
 
         await retry_async(op, self.settings.max_http_attempts)
@@ -88,6 +104,13 @@ class FreshsalesClient:
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
+            if response.status_code >= 400:
+                print(
+                    f"FRESHSALES_UPDATE_META_LEAD_ID_ERROR status={response.status_code} "
+                    f"body={response.text} payload={payload}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             response.raise_for_status()
 
         await retry_async(op, self.settings.max_http_attempts)
