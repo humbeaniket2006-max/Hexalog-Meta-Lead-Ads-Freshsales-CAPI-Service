@@ -153,7 +153,24 @@ async def receive_meta_leadgen(
                     try:
                         created = await freshsales.create_contact(contact_fields, leadgen_id)
                     except DuplicateContactError as exc:
-                        record_id = exc.object_id
+                        duplicate_match = await freshsales.find_contact_by_email_or_phone(email=None, phone=phone)
+                        if duplicate_match is None:
+                            logger.error(
+                                "freshsales_duplicate_mobile_lookup_failed",
+                                correlation_id=correlation_id,
+                                leadgen_id=leadgen_id,
+                                object_id=exc.object_id,
+                            )
+                            raise FreshsalesContactCreateError("Freshsales duplicate mobile contact lookup failed")
+                        record_id = str(duplicate_match.get("id", ""))
+                        if not record_id:
+                            logger.error(
+                                "freshsales_duplicate_mobile_lookup_missing_id",
+                                correlation_id=correlation_id,
+                                leadgen_id=leadgen_id,
+                                object_id=exc.object_id,
+                            )
+                            raise FreshsalesContactCreateError("Freshsales duplicate mobile contact missing id")
                         try:
                             await freshsales.update_meta_lead_id(record_id, leadgen_id)
                         except Exception as update_exc:

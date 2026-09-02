@@ -42,9 +42,9 @@ async def test_meta_new_lead_creates_freshsales_lead() -> None:
                             ]
                         },
                     )
-                if request.url.path.endswith("/api/contacts/search"):
+                if request.url.path.endswith("/api/lookup"):
                     calls["search"] += 1
-                    return Response(200, json={"contacts": []})
+                    return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
                     created_payload.update(json.loads(request.content))
@@ -71,8 +71,8 @@ async def test_meta_duplicate_flow() -> None:
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
                     return Response(200, json={"field_data": [{"name": "email", "values": ["a@example.com"]}]})
-                if request.url.path.endswith("/api/contacts/search"):
-                    return Response(200, json={"contacts": []})
+                if request.url.path.endswith("/api/lookup"):
+                    return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["fresh_create"] += 1
                     return Response(200, json={"contact": {"id": "lead1"}})
@@ -90,7 +90,7 @@ async def test_meta_duplicate_mobile_create_updates_existing_contact_meta_id() -
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
-            calls = {"create": 0, "update_meta": 0}
+            calls = {"create": 0, "lookup": 0, "update_meta": 0}
             updated_payload: dict[str, object] = {}
 
             async def handler(request):
@@ -105,8 +105,11 @@ async def test_meta_duplicate_mobile_create_updates_existing_contact_meta_id() -
                             ]
                         },
                     )
-                if request.url.path.endswith("/api/contacts/search"):
-                    return Response(200, json={"contacts": []})
+                if request.url.path.endswith("/api/lookup"):
+                    calls["lookup"] += 1
+                    if calls["lookup"] < 3:
+                        return Response(200, json={"contacts": {"records": []}})
+                    return Response(200, json={"contacts": {"records": [{"id": "402216158144"}]}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
                     return Response(
@@ -121,7 +124,7 @@ async def test_meta_duplicate_mobile_create_updates_existing_contact_meta_id() -
                             }
                         },
                     )
-                if request.url.path.endswith("/api/contacts/2090674640783768576") and request.method == "PUT":
+                if request.url.path.endswith("/api/contacts/402216158144") and request.method == "PUT":
                     calls["update_meta"] += 1
                     updated_payload.update(json.loads(request.content))
                     return Response(200, json={})
@@ -129,7 +132,7 @@ async def test_meta_duplicate_mobile_create_updates_existing_contact_meta_id() -
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 1, "update_meta": 1}
+            assert calls == {"create": 1, "lookup": 3, "update_meta": 1}
             assert updated_payload == {"contact": {"custom_field": {"meta_lead_id": "l-mobile-dup"}}}
 
 
@@ -145,8 +148,8 @@ async def test_meta_existing_lead_by_email_updates_without_duplicate() -> None:
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
                     return Response(200, json={"field_data": [{"name": "email", "values": ["a@example.com"]}, {"name": "full_name", "values": ["Ada Lovelace"]}]})
-                if request.url.path.endswith("/api/contacts/search"):
-                    return Response(200, json={"contacts": [{"id": "lead-email", "email": "a@example.com", "first_name": "Ada"}]})
+                if request.url.path.endswith("/api/lookup"):
+                    return Response(200, json={"contacts": {"records": [{"id": "lead-email", "email": "a@example.com", "first_name": "Ada"}]}})
                 if request.url.path.endswith("/api/contacts/lead-email") and request.method == "PUT":
                     calls["update"] += 1
                     updated_payload.update(json.loads(request.content))
@@ -176,9 +179,9 @@ async def test_meta_existing_lead_by_phone_updates_without_duplicate() -> None:
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
                     return Response(200, json={"field_data": [{"name": "phone_number", "values": ["123"]}]})
-                if request.url.path.endswith("/api/contacts/search"):
+                if request.url.path.endswith("/api/lookup"):
                     searched.append(str(request.url))
-                    return Response(200, json={"contacts": [{"id": "lead-phone"}]})
+                    return Response(200, json={"contacts": {"records": [{"id": "lead-phone"}]}})
                 if request.url.path.endswith("/api/contacts/lead-phone") and request.method == "PUT":
                     calls["update"] += 1
                     return Response(200, json={})
@@ -190,7 +193,7 @@ async def test_meta_existing_lead_by_phone_updates_without_duplicate() -> None:
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
             assert calls == {"create": 0, "update": 1}
-            assert any("mobile_number=123" in url for url in searched)
+            assert any("q=123" in url and "f=contacts" in url and "entities=contact" in url for url in searched)
 
 
 @pytest.mark.asyncio
@@ -204,9 +207,9 @@ async def test_meta_name_only_payload_creates_low_confidence_lead() -> None:
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
                     return Response(200, json={"field_data": [{"name": "full_name", "values": ["Single Name"]}]})
-                if request.url.path.endswith("/api/contacts/search"):
+                if request.url.path.endswith("/api/lookup"):
                     calls["search"] += 1
-                    return Response(200, json={"contacts": []})
+                    return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
                     return Response(200, json={"contact": {"id": "lead-name"}})

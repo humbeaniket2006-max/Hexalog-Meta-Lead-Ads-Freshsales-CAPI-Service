@@ -27,21 +27,20 @@ class FreshsalesClient:
         return str(self.settings.freshsales_domain).rstrip("/")
 
     async def search_contacts_by_field(self, field_name: str, value: str) -> list[dict[str, object]]:
-        params = {field_name: value}
+        params = {"q": value, "f": "contacts", "entities": "contact"}
 
         async def op() -> list[dict[str, object]]:
             response = await self.client.get(
-                f"{self.base_url}/api/contacts/search",
+                f"{self.base_url}/api/lookup",
                 headers=self.headers,
                 params=params,
                 timeout=self.settings.http_timeout_seconds,
             )
-            if response.status_code == 404:
-                return []
             response.raise_for_status()
             data = response.json()
-            contacts = data.get("contacts", []) if isinstance(data, dict) else []
-            return [contact for contact in contacts if isinstance(contact, dict)]
+            contacts = data.get("contacts") if isinstance(data, dict) else None
+            records = contacts.get("records") if isinstance(contacts, dict) else []
+            return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
 
         return await retry_async(op, self.settings.max_http_attempts)
 
