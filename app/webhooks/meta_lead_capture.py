@@ -12,7 +12,7 @@ from app.logging_config import get_logger
 from app.models.webhooks import MetaLeadgenWebhookPayload
 from app.security import verify_meta_signature
 from app.services.alerts import AlertService
-from app.services.freshsales_client import FreshsalesClient
+from app.services.freshsales_client import DuplicateContactError, FreshsalesClient
 from app.models.webhooks import MetaGraphLeadPayload
 from app.services.meta_graph import MetaGraphClient
 
@@ -162,6 +162,31 @@ async def receive_meta_leadgen(
                     logger.warning("meta_lead_low_confidence_create", correlation_id=correlation_id, leadgen_id=leadgen_id)
                 try:
                     created = await freshsales.create_contact(contact_fields, leadgen_id)
+                except DuplicateContactError as exc:
+                    logger.info(
+                        "freshsales_duplicate_mobile_detected",
+                        correlation_id=correlation_id,
+                        leadgen_id=leadgen_id,
+                        object_id=exc.object_id,
+                    )
+                    try:
+                        await freshsales.update_meta_lead_id(exc.object_id, leadgen_id)
+                    except Exception as update_exc:
+                        logger.error(
+                            "freshsales_duplicate_update_failed",
+                            correlation_id=correlation_id,
+                            leadgen_id=leadgen_id,
+                            object_id=exc.object_id,
+                            error=type(update_exc).__name__,
+                        )
+                        raise FreshsalesContactCreateError from update_exc
+                    record_id = exc.object_id
+                    logger.info(
+                        "freshsales_duplicate_mobile_resolved",
+                        correlation_id=correlation_id,
+                        leadgen_id=leadgen_id,
+                        object_id=record_id,
+                    )
                 except Exception as exc:
                     if isinstance(exc, httpx.HTTPStatusError):
                         logger.error(

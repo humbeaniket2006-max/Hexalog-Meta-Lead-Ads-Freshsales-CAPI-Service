@@ -161,6 +161,56 @@ async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
 
 
 @pytest.mark.asyncio
+async def test_meta_duplicate_mobile_create_safety_net_updates_meta_id() -> None:
+    body = meta_webhook_body("l-mobile-race")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            calls = {"create": 0, "lookup": 0, "update": 0}
+            updated_payload: dict[str, object] = {}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "GET":
+                    return Response(
+                        200,
+                        json={
+                            "field_data": [
+                                {"name": "full_name", "values": ["Ada Lovelace"]},
+                                {"name": "email", "values": ["ada@example.com"]},
+                                {"name": "phone_number", "values": ["+919307152210"]},
+                            ]
+                        },
+                    )
+                if request.url.path.endswith("/api/lookup"):
+                    calls["lookup"] += 1
+                    return Response(200, json={"contacts": {"records": []}})
+                if request.url.path.endswith("/api/contacts") and request.method == "POST":
+                    calls["create"] += 1
+                    return Response(
+                        400,
+                        json={
+                            "errors": {
+                                "code": 400,
+                                "message": [
+                                    "The mobile number already exists.",
+                                    'Mcr error {"error_code"=>3002, "errors"=>[{"object_type"=>"Contact", "object_id"=>"2090674640783768576", "field"=>"mobile_number", "code"=>3032, "message"=>"MobileNumber is not unique"}]}',
+                                ],
+                            }
+                        },
+                    )
+                if request.url.path.endswith("/api/contacts/2090674640783768576") and request.method == "PUT":
+                    calls["update"] += 1
+                    updated_payload.update(json.loads(request.content))
+                    return Response(200, json={})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+            assert calls == {"create": 1, "lookup": 2, "update": 1}
+            assert updated_payload == {"contact": {"custom_field": {"meta_lead_id": "l-mobile-race"}}}
+
+
+@pytest.mark.asyncio
 async def test_meta_existing_lead_by_email_skips_without_create() -> None:
     body = meta_webhook_body("l-email")
     transport = ASGITransport(app=app)

@@ -1,9 +1,16 @@
+import re
 import sys
 
 import httpx
 
 from app.config import Settings
 from app.retry import retry_async
+
+
+class DuplicateContactError(RuntimeError):
+    def __init__(self, object_id: str) -> None:
+        super().__init__(f"Freshsales contact already exists: {object_id}")
+        self.object_id = object_id
 
 
 class FreshsalesClient:
@@ -32,6 +39,13 @@ class FreshsalesClient:
             response.raise_for_status()
             data = response.json()
             records = self._extract_contact_records(data)
+            if field_name == "mobile_number":
+                print(
+                    f"FRESHSALES_SEARCH_DEBUG value={value} "
+                    f"phones={[self._record_phone_values(record) for record in records]} records={records}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             return self._matching_contact_records(records, field_name, value)
 
         return await retry_async(op, self.settings.max_http_attempts)
@@ -57,6 +71,9 @@ class FreshsalesClient:
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
+            duplicate_object_id = self._duplicate_mobile_contact_id(response)
+            if duplicate_object_id:
+                raise DuplicateContactError(duplicate_object_id)
             if response.status_code >= 400:
                 print(
                     f"FRESHSALES_CREATE_CONTACT_ERROR status={response.status_code} "
@@ -122,6 +139,29 @@ class FreshsalesClient:
         custom_field[self.settings.freshsales_meta_lead_field] = leadgen_id
         payload["custom_field"] = custom_field
         return payload
+
+    def _duplicate_mobile_contact_id(self, response: httpx.Response) -> str | None:
+        if response.status_code != 400:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        errors = data.get("errors") if isinstance(data, dict) else None
+        if not isinstance(errors, dict):
+            return None
+        messages = errors.get("message")
+        if not isinstance(messages, list):
+            return None
+        for message in messages:
+            if not isinstance(message, str):
+                continue
+            if "MobileNumber is not unique" not in message:
+                continue
+            match = re.search(r'"object_id"=>"(\d+)"', message)
+            if match:
+                return match.group(1)
+        return None
 
     def _extract_contact_records(self, data: object) -> list[dict[str, object]]:
         if not isinstance(data, dict):
