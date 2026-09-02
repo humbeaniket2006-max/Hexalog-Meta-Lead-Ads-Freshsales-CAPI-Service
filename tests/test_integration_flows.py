@@ -85,13 +85,50 @@ async def test_meta_duplicate_flow() -> None:
 
 
 @pytest.mark.asyncio
-async def test_meta_duplicate_mobile_create_updates_existing_contact_meta_id() -> None:
+async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
     body = meta_webhook_body("l-mobile-dup")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
-            calls = {"create": 0, "lookup": 0, "update_meta": 0}
-            updated_payload: dict[str, object] = {}
+            calls = {"create": 0, "lookup": 0, "update": 0}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "GET":
+                    return Response(
+                        200,
+                        json={
+                            "field_data": [
+                                {"name": "full_name", "values": ["Ada Lovelace"]},
+                                {"name": "email", "values": ["ada@example.com"]},
+                                {"name": "phone_number", "values": ["123"]},
+                            ]
+                        },
+                    )
+                if request.url.path.endswith("/api/lookup"):
+                    calls["lookup"] += 1
+                    if calls["lookup"] < 2:
+                        return Response(200, json={"contacts": {"records": []}})
+                    return Response(200, json={"contacts": {"records": [{"id": "402216158144"}]}})
+                if request.url.path.endswith("/api/contacts") and request.method == "POST":
+                    calls["create"] += 1
+                    return Response(500, json={"unexpected": "create should not be called"})
+                if request.url.path.endswith("/api/contacts/402216158144") and request.method == "PUT":
+                    calls["update"] += 1
+                    return Response(200, json={})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+            assert calls == {"create": 0, "lookup": 2, "update": 0}
+
+
+@pytest.mark.asyncio
+async def test_meta_duplicate_mobile_create_race_skips_existing_contact() -> None:
+    body = meta_webhook_body("l-mobile-race")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            calls = {"create": 0, "lookup": 0, "update": 0}
 
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
@@ -124,26 +161,23 @@ async def test_meta_duplicate_mobile_create_updates_existing_contact_meta_id() -
                             }
                         },
                     )
-                if request.url.path.endswith("/api/contacts/402216158144") and request.method == "PUT":
-                    calls["update_meta"] += 1
-                    updated_payload.update(json.loads(request.content))
+                if request.url.path.endswith("/api/contacts/402216158144") and request.method in {"PATCH", "PUT"}:
+                    calls["update"] += 1
                     return Response(200, json={})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 1, "lookup": 3, "update_meta": 1}
-            assert updated_payload == {"contact": {"custom_field": {"meta_lead_id": "l-mobile-dup"}}}
+            assert calls == {"create": 1, "lookup": 3, "update": 0}
 
 
 @pytest.mark.asyncio
-async def test_meta_existing_lead_by_email_updates_without_duplicate() -> None:
+async def test_meta_existing_lead_by_email_skips_without_create() -> None:
     body = meta_webhook_body("l-email")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
             calls = {"create": 0, "update": 0}
-            updated_payload: dict[str, object] = {}
 
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
@@ -152,7 +186,6 @@ async def test_meta_existing_lead_by_email_updates_without_duplicate() -> None:
                     return Response(200, json={"contacts": {"records": [{"id": "lead-email", "email": "a@example.com", "first_name": "Ada"}]}})
                 if request.url.path.endswith("/api/contacts/lead-email") and request.method == "PUT":
                     calls["update"] += 1
-                    updated_payload.update(json.loads(request.content))
                     return Response(200, json={})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
@@ -161,14 +194,11 @@ async def test_meta_existing_lead_by_email_updates_without_duplicate() -> None:
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 0, "update": 1}
-            assert "first_name" not in updated_payload["contact"]  # type: ignore[operator]
-            assert updated_payload["contact"]["last_name"] == "Lovelace"  # type: ignore[index]
-            assert updated_payload["contact"]["custom_field"]["meta_lead_id"] == "l-email"  # type: ignore[index]
+            assert calls == {"create": 0, "update": 0}
 
 
 @pytest.mark.asyncio
-async def test_meta_existing_lead_by_phone_updates_without_duplicate() -> None:
+async def test_meta_existing_lead_by_phone_skips_without_create() -> None:
     body = meta_webhook_body("l-phone")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -192,7 +222,7 @@ async def test_meta_existing_lead_by_phone_updates_without_duplicate() -> None:
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 0, "update": 1}
+            assert calls == {"create": 0, "update": 0}
             assert any("q=123" in url and "f=contacts" in url and "entities=contact" in url for url in searched)
 
 
