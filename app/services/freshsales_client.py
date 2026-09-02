@@ -27,6 +27,9 @@ class FreshsalesClient:
         return str(self.settings.freshsales_domain).rstrip("/")
 
     async def search_contacts_by_field(self, field_name: str, value: str) -> list[dict[str, object]]:
+        if field_name == "mobile_number":
+            return await self._search_contacts_by_mobile_number(value)
+
         params = {"q": value, "f": "contacts", "entities": "contact"}
 
         async def op() -> list[dict[str, object]]:
@@ -39,13 +42,6 @@ class FreshsalesClient:
             response.raise_for_status()
             data = response.json()
             records = self._extract_contact_records(data)
-            if field_name == "mobile_number":
-                print(
-                    f"FRESHSALES_SEARCH_DEBUG value={value} "
-                    f"phones={[self._record_phone_values(record) for record in records]} records={records}",
-                    file=sys.stderr,
-                    flush=True,
-                )
             return self._matching_contact_records(records, field_name, value)
 
         return await retry_async(op, self.settings.max_http_attempts)
@@ -55,7 +51,29 @@ class FreshsalesClient:
             email_matches = await self.search_contacts_by_field("email", email)
             if email_matches:
                 return email_matches[0]
+        if phone:
+            phone_matches = await self.search_contacts_by_field("mobile_number", phone)
+            if phone_matches:
+                return phone_matches[0]
         return None
+
+    async def _search_contacts_by_mobile_number(self, value: str) -> list[dict[str, object]]:
+        payload = {"filter_rule": [{"attribute": "mobile_number", "operator": "is_in", "value": value}]}
+
+        async def op() -> list[dict[str, object]]:
+            response = await self.client.post(
+                f"{self.base_url}/api/filtered_search/contact",
+                headers=self.headers,
+                json=payload,
+                timeout=self.settings.http_timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+            contacts = data.get("contacts") if isinstance(data, dict) else []
+            records = [contact for contact in contacts if isinstance(contact, dict)] if isinstance(contacts, list) else []
+            return self._matching_contact_records(records, "mobile_number", value)
+
+        return await retry_async(op, self.settings.max_http_attempts)
 
     async def create_contact(self, contact_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
         payload = {"contact": self._with_meta_lead_id(contact_fields, leadgen_id)}
