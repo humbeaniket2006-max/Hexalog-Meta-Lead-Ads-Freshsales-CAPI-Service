@@ -12,7 +12,7 @@ from app.logging_config import get_logger
 from app.models.webhooks import MetaLeadgenWebhookPayload
 from app.security import verify_meta_signature
 from app.services.alerts import AlertService
-from app.services.freshsales_client import DuplicateContactError, FreshsalesClient
+from app.services.freshsales_client import FreshsalesClient
 from app.models.webhooks import MetaGraphLeadPayload
 from app.services.meta_graph import MetaGraphClient
 
@@ -21,10 +21,6 @@ logger = get_logger(__name__)
 
 
 class FreshsalesContactCreateError(RuntimeError):
-    pass
-
-
-class FreshsalesContactUpdateError(RuntimeError):
     pass
 
 
@@ -166,34 +162,6 @@ async def receive_meta_leadgen(
                     logger.warning("meta_lead_low_confidence_create", correlation_id=correlation_id, leadgen_id=leadgen_id)
                 try:
                     created = await freshsales.create_contact(contact_fields, leadgen_id)
-                except DuplicateContactError as exc:
-                    duplicate_match = await freshsales.find_contact_by_email_or_phone(email=None, phone=phone)
-                    if duplicate_match is None:
-                        logger.error(
-                            "freshsales_duplicate_mobile_lookup_failed",
-                            correlation_id=correlation_id,
-                            leadgen_id=leadgen_id,
-                            mobile_number=phone,
-                            object_id=exc.object_id,
-                        )
-                        raise FreshsalesContactCreateError("Freshsales duplicate mobile contact lookup failed")
-                    record_id = str(duplicate_match.get("id", ""))
-                    if not record_id:
-                        logger.error(
-                            "freshsales_duplicate_mobile_lookup_missing_id",
-                            correlation_id=correlation_id,
-                            leadgen_id=leadgen_id,
-                            mobile_number=phone,
-                            object_id=exc.object_id,
-                        )
-                        raise FreshsalesContactCreateError("Freshsales duplicate mobile contact missing id")
-                    logger.info(
-                        "duplicate_lead_skipped",
-                        correlation_id=correlation_id,
-                        leadgen_id=leadgen_id,
-                        mobile_number=phone,
-                        record_id=record_id,
-                    )
                 except Exception as exc:
                     if isinstance(exc, httpx.HTTPStatusError):
                         logger.error(

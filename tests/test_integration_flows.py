@@ -3,10 +3,11 @@ import hmac
 import json
 
 import pytest
-from httpx import ASGITransport, AsyncClient, Response
+from httpx import ASGITransport, AsyncClient, MockTransport, Response
 
 from app.config import get_settings
 from app.main import app
+from app.services.freshsales_client import FreshsalesClient
 
 
 def sign(body: bytes) -> str:
@@ -19,6 +20,33 @@ def meta_webhook_body(leadgen_id: str) -> bytes:
         + leadgen_id
         + '"}}]}]}'
     ).encode()
+
+
+@pytest.mark.asyncio
+async def test_freshsales_lookup_returns_first_normalized_phone_match() -> None:
+    settings = get_settings()
+
+    async def handler(request):
+        assert request.url.path.endswith("/api/lookup")
+        assert request.url.params["q"] == "+91 93071-52210"
+        assert request.url.params["f"] == "contacts"
+        assert request.url.params["entities"] == "contact"
+        return Response(
+            200,
+            json={
+                "records": [
+                    {"id": "402216158144", "mobile_number": "9307152210"},
+                    {"id": "402216158145", "mobile_number": "+919307152210"},
+                ]
+            },
+        )
+
+    async with AsyncClient(transport=MockTransport(handler), base_url="http://test") as http_client:
+        freshsales = FreshsalesClient(settings, http_client)
+        contact = await freshsales.find_contact_by_email_or_phone(email=None, phone="+91 93071-52210")
+
+    assert contact is not None
+    assert contact["id"] == "402216158144"
 
 
 @pytest.mark.asyncio
@@ -100,7 +128,7 @@ async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
                             "field_data": [
                                 {"name": "full_name", "values": ["Ada Lovelace"]},
                                 {"name": "email", "values": ["ada@example.com"]},
-                                {"name": "phone_number", "values": ["123"]},
+                                {"name": "phone_number", "values": ["+919307152210"]},
                             ]
                         },
                     )
@@ -108,7 +136,17 @@ async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
                     calls["lookup"] += 1
                     if calls["lookup"] < 2:
                         return Response(200, json={"contacts": {"records": []}})
-                    return Response(200, json={"contacts": {"records": [{"id": "402216158144"}]}})
+                    return Response(
+                        200,
+                        json={
+                            "contacts": {
+                                "records": [
+                                    {"id": "402216158144", "mobile_number": "9307152210"},
+                                    {"id": "402216158145", "mobile_number": "9999999999"},
+                                ]
+                            }
+                        },
+                    )
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
                     return Response(500, json={"unexpected": "create should not be called"})
@@ -120,55 +158,6 @@ async def test_meta_duplicate_mobile_lookup_skips_without_create() -> None:
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
             assert calls == {"create": 0, "lookup": 2, "update": 0}
-
-
-@pytest.mark.asyncio
-async def test_meta_duplicate_mobile_create_race_skips_existing_contact() -> None:
-    body = meta_webhook_body("l-mobile-race")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        async with app.router.lifespan_context(app):
-            calls = {"create": 0, "lookup": 0, "update": 0}
-
-            async def handler(request):
-                if "graph.facebook.com" in str(request.url) and request.method == "GET":
-                    return Response(
-                        200,
-                        json={
-                            "field_data": [
-                                {"name": "full_name", "values": ["Ada Lovelace"]},
-                                {"name": "email", "values": ["ada@example.com"]},
-                                {"name": "phone_number", "values": ["123"]},
-                            ]
-                        },
-                    )
-                if request.url.path.endswith("/api/lookup"):
-                    calls["lookup"] += 1
-                    if calls["lookup"] < 3:
-                        return Response(200, json={"contacts": {"records": []}})
-                    return Response(200, json={"contacts": {"records": [{"id": "402216158144"}]}})
-                if request.url.path.endswith("/api/contacts") and request.method == "POST":
-                    calls["create"] += 1
-                    return Response(
-                        400,
-                        json={
-                            "errors": {
-                                "code": 400,
-                                "message": [
-                                    "The mobile number already exists.",
-                                    'Mcr error {"error_code"=>3002, "errors"=>[{"object_type"=>"Contact", "object_id"=>"2090674640783768576", "field"=>"mobile_number", "code"=>3032, "message"=>"MobileNumber is not unique"}]}',
-                                ],
-                            }
-                        },
-                    )
-                if request.url.path.endswith("/api/contacts/402216158144") and request.method in {"PATCH", "PUT"}:
-                    calls["update"] += 1
-                    return Response(200, json={})
-                return Response(200, json={})
-
-            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 1, "lookup": 3, "update": 0}
 
 
 @pytest.mark.asyncio
