@@ -9,6 +9,7 @@ from app.db.models import Base
 from app.db.repository import Repository
 from app.db.session import build_engine, build_sessionmaker
 from app.logging_config import configure_logging
+from app.routes.freshsales_lead_events import router as freshsales_lead_events_router
 from app.security import InMemoryRateLimiter
 from app.webhooks.freshsales_status import router as freshsales_router
 from app.webhooks.meta_lead_capture import router as meta_router
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Hexalog Freshsales CAPI Service", lifespan=lifespan)
 app.include_router(meta_router)
 app.include_router(freshsales_router)
+app.include_router(freshsales_lead_events_router)
 
 
 @app.get("/health")

@@ -1,6 +1,5 @@
 from uuid import uuid4
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,10 +8,11 @@ from app.config import Settings, get_settings
 from app.db.repository import Repository, meta_dedupe_key
 from app.db.session import get_session
 from app.logging_config import get_logger
+from app.matching import match_with_backoff
 from app.models.webhooks import MetaLeadgenWebhookPayload
 from app.security import verify_meta_signature
 from app.services.alerts import AlertService
-from app.services.freshsales_client import DuplicateContactError, FreshsalesClient
+from app.services.freshsales_client import FreshsalesClient
 from app.models.webhooks import MetaGraphLeadPayload
 from app.services.meta_graph import MetaGraphClient
 
@@ -142,62 +142,32 @@ async def receive_meta_leadgen(
                 meta_fields = extract_meta_fields(meta_lead)
                 email = meta_fields.get("email")
                 phone = meta_fields.get("phone_number") or meta_fields.get("phone")
-                contact_fields = build_freshsales_contact_fields(meta_fields, settings)
-                matched = await freshsales.find_contact_by_email_or_phone(email=email, phone=phone)
+                if not email and not phone:
+                    raise FreshsalesContactCreateError("Meta lead has no email or phone to match on")
+                matched = await match_with_backoff(freshsales, settings, email, phone, correlation_id)
                 if matched is not None:
                     record_id = str(matched.get("id", ""))
                     if not record_id:
                         raise RuntimeError("Freshsales match missing id")
-                    try:
-                        await freshsales.update_meta_lead_id(record_id, leadgen_id)
-                    except Exception as exc:
-                        logger.warning(
-                            "freshsales_matched_contact_update_failed",
-                            correlation_id=correlation_id,
-                            leadgen_id=leadgen_id,
-                            record_id=record_id,
-                            error=type(exc).__name__,
-                        )
-                    else:
-                        logger.info(
-                            "freshsales_matched_contact_updated",
-                            correlation_id=correlation_id,
-                            leadgen_id=leadgen_id,
-                            mobile_number=phone,
-                            record_id=record_id,
-                        )
+                    await freshsales.update_meta_lead_id(record_id, leadgen_id)
+                    logger.info(
+                        "freshsales_matched_contact_updated",
+                        correlation_id=correlation_id,
+                        leadgen_id=leadgen_id,
+                        mobile_number=phone,
+                        record_id=record_id,
+                    )
                     await repo.save_lead_state(leadgen_id, record_id, record_type="contact")
                     await repo.mark_dedupe_success(dedupe_key)
                     continue
-                if not email and not phone:
-                    logger.warning("meta_lead_low_confidence_create", correlation_id=correlation_id, leadgen_id=leadgen_id)
-                try:
-                    created = await freshsales.create_contact(contact_fields, leadgen_id)
-                except DuplicateContactError as exc:
-                    logger.warning(
-                        "freshsales_duplicate_mobile_unresolved",
-                        correlation_id=correlation_id,
-                        leadgen_id=leadgen_id,
-                        object_id=exc.object_id,
-                    )
-                    raise FreshsalesContactCreateError from exc
-                except Exception as exc:
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        logger.error(
-                            "freshsales_contact_create_failed",
-                            correlation_id=correlation_id,
-                            leadgen_id=leadgen_id,
-                            status_code=exc.response.status_code,
-                            response_body=exc.response.text,
-                        )
-                    raise FreshsalesContactCreateError from exc
-                else:
-                    record_id = str(created.get("id", ""))
-                    if not record_id:
-                        raise FreshsalesContactCreateError("Freshsales created contact missing id")
-                    logger.info("freshsales_contact_created", correlation_id=correlation_id, record_id=record_id)
-                await repo.save_lead_state(leadgen_id, record_id, record_type="contact")
-                await repo.mark_dedupe_success(dedupe_key)
+                logger.warning(
+                    "freshsales_contact_not_found_after_retries",
+                    correlation_id=correlation_id,
+                    leadgen_id=leadgen_id,
+                )
+                raise FreshsalesContactCreateError(
+                    "No matching Freshsales contact found after retries (native Meta integration may not have created it yet)"
+                )
             except Exception as exc:
                 await repo.dead_letter(correlation_id, "meta_lead_capture", payload.model_dump(), type(exc).__name__, settings.max_http_attempts)
                 await repo.mark_dedupe_failed(dedupe_key)

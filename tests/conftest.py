@@ -7,6 +7,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("META_APP_SECRET", "appsecret")
     monkeypatch.setenv("META_PAGE_ACCESS_TOKEN", "pagetoken")
     monkeypatch.setenv("META_PIXEL_ID", "pixel123")
+    monkeypatch.setenv("META_CAPI_ACCESS_TOKEN", "capitoken")
+    monkeypatch.setenv("META_DATASET_ID", "dataset123")
     monkeypatch.setenv("FRESHSALES_DOMAIN", "https://fresh.example.com")
     monkeypatch.setenv("FRESHSALES_API_KEY", "freshkey")
     monkeypatch.setenv("FRESHSALES_WEBHOOK_SECRET", "freshsecret")

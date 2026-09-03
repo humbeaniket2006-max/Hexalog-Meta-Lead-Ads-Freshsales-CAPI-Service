@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import AnyHttpUrl, Field, SecretStr
+from pydantic import AliasChoices, AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     meta_app_secret: SecretStr
     meta_page_access_token: SecretStr
     meta_pixel_id: str = Field(min_length=1, max_length=128)
+    meta_capi_access_token: SecretStr = Field(validation_alias=AliasChoices("META_CAPI_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN"))
+    meta_dataset_id: str = Field(validation_alias=AliasChoices("META_DATASET_ID", "META_PIXEL_ID"), min_length=1, max_length=128)
     freshsales_domain: AnyHttpUrl
     freshsales_api_key: SecretStr
     freshsales_webhook_secret: SecretStr

@@ -51,6 +51,12 @@ class Repository:
         await self.session.execute(stmt)
         await self.session.commit()
 
+    async def get_leadgen_id_by_record_id(self, record_id: str, record_type: str = "contact") -> str | None:
+        result = await self.session.execute(
+            select(LeadState.leadgen_id).where(LeadState.freshsales_record_id == record_id, LeadState.record_type == record_type)
+        )
+        return result.scalar_one_or_none()
+
     async def has_record(self, record_id: str, record_type: str) -> bool:
         result = await self.session.execute(
             select(LeadState.id).where(LeadState.freshsales_record_id == record_id, LeadState.record_type == record_type)

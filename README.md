@@ -4,8 +4,9 @@ Production FastAPI service replacing the LeadsBridge-style connector between Met
 
 ## Flows
 
-- Meta Lead Ads webhook captures `leadgen_id`, fetches the full lead payload from Meta Graph API, searches Freshsales by email then phone, and either creates a new Lead or updates an existing Lead without overwriting populated fields. The configured Freshsales custom field is populated with the Meta `leadgen_id`.
+- Meta Lead Ads webhook captures `leadgen_id`, fetches the full lead payload from Meta Graph API, searches Freshsales by email then phone, and stamps the configured Freshsales custom field with the Meta `leadgen_id` on the matching contact.
 - Freshsales status webhook validates a shared secret, confirms the record exists in local state, fetches the full Freshsales record, maps the status to a Meta CRM CAPI event, and sends it with `lead_id`.
+- Freshsales lead-event webhook validates `X-Internal-Secret`, resolves contact events through local lead state, and sends Qualified, NotQualified, or Conversion events to Meta CAPI.
 
 Meta lead field mapping is configured in `app/config.py` through `meta_to_freshsales_field_mapping`. The default maps `full_name`, `email`, `phone_number`, and `phone`; extend that mapping when Instant Forms add new custom questions.
 
@@ -37,6 +38,8 @@ All secrets come from environment variables. Do not commit `.env`.
 - `META_APP_SECRET`
 - `META_PAGE_ACCESS_TOKEN`
 - `META_PIXEL_ID`
+- `META_CAPI_ACCESS_TOKEN`
+- `META_DATASET_ID`
 - `FRESHSALES_DOMAIN`: full Freshsales URL including `https://`, for example `https://yourdomain.myfreshworks.com` or `https://yourdomain.myfreshworks.com/crm/sales`
 - `FRESHSALES_API_KEY`
 - `FRESHSALES_WEBHOOK_SECRET`

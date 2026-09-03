@@ -4,8 +4,11 @@ import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
+from sqlalchemy import select
 
 from app.config import get_settings
+from app.db.models import DeadLetter
+from app.db.repository import Repository
 from app.main import app
 from app.services.freshsales_client import FreshsalesClient
 
@@ -20,6 +23,123 @@ def meta_webhook_body(leadgen_id: str) -> bytes:
         + leadgen_id
         + '"}}]}]}'
     ).encode()
+
+
+async def dead_letter_errors() -> list[str]:
+    async with app.state.sessionmaker() as session:
+        result = await session.execute(select(DeadLetter.error))
+        return list(result.scalars())
+
+
+@pytest.mark.asyncio
+async def test_freshsales_lead_event_qualified_with_match_sends_meta_capi_event() -> None:
+    body = {"event_name": "Qualified", "contact_id": "contact-qualified"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            async with app.state.sessionmaker() as session:
+                await Repository(session).save_lead_state("leadgen-qualified", "contact-qualified")
+
+            calls = {"capi": 0}
+            capi_payload: dict[str, object] = {}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "POST":
+                    calls["capi"] += 1
+                    assert request.url.path == "/v20.0/dataset123/events"
+                    capi_payload.update(json.loads(request.content))
+                    return Response(200, json={"events_received": 1})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+
+            assert response.status_code == 200
+            assert calls["capi"] == 1
+            assert capi_payload["access_token"] == "capitoken"
+            event = capi_payload["data"][0]  # type: ignore[index]
+            assert event["event_name"] == "Qualified"
+            assert event["action_source"] == "system_generated"
+            assert isinstance(event["event_time"], int)
+            assert event["user_data"] == {"lead_id": "leadgen-qualified"}
+
+
+@pytest.mark.asyncio
+async def test_freshsales_lead_event_qualified_with_no_match_returns_ok_without_capi() -> None:
+    body = {"event_name": "Qualified", "contact_id": "missing-contact"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            calls = {"capi": 0}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "POST":
+                    calls["capi"] += 1
+                    return Response(200, json={"events_received": 1})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+
+            assert response.status_code == 200
+            assert calls["capi"] == 0
+            assert await dead_letter_errors() == []
+
+
+@pytest.mark.asyncio
+async def test_freshsales_lead_event_conversion_uses_payload_meta_lead_id_for_capi() -> None:
+    body = {"event_name": "Conversion", "deal_id": "deal-won", "meta_lead_id": "leadgen-conversion", "amount": 2499.5}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            calls = {"capi": 0}
+            capi_payload: dict[str, object] = {}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "POST":
+                    calls["capi"] += 1
+                    assert request.url.path == "/v20.0/dataset123/events"
+                    capi_payload.update(json.loads(request.content))
+                    return Response(200, json={"events_received": 1})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+
+            assert response.status_code == 200
+            assert calls["capi"] == 1
+            assert capi_payload["access_token"] == "capitoken"
+            event = capi_payload["data"][0]  # type: ignore[index]
+            assert event["event_name"] == "Conversion"
+            assert event["action_source"] == "system_generated"
+            assert isinstance(event["event_time"], int)
+            assert event["user_data"] == {"lead_id": "leadgen-conversion"}
+            assert event["custom_data"] == {"value": 2499.5, "currency": "USD"}
+
+
+@pytest.mark.asyncio
+async def test_freshsales_lead_event_meta_capi_failure_dead_letters_and_returns_ok() -> None:
+    body = {"event_name": "Qualified", "contact_id": "contact-meta-fail"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            async with app.state.sessionmaker() as session:
+                await Repository(session).save_lead_state("leadgen-meta-fail", "contact-meta-fail")
+
+            calls = {"capi": 0}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "POST":
+                    calls["capi"] += 1
+                    return Response(500, json={"error": "downstream"})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+
+            assert response.status_code == 200
+            assert calls["capi"] == get_settings().max_http_attempts
+            assert await dead_letter_errors() == ["RetryExhaustedError"]
 
 
 @pytest.mark.asyncio
@@ -49,14 +169,13 @@ async def test_freshsales_filtered_search_returns_first_normalized_phone_match()
 
 
 @pytest.mark.asyncio
-async def test_meta_new_lead_creates_freshsales_lead() -> None:
+async def test_meta_new_lead_dead_letters_when_no_freshsales_match() -> None:
     settings = get_settings()
     body = meta_webhook_body("l-new")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
             calls = {"search": 0, "create": 0}
-            created_payload: dict[str, object] = {}
 
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
@@ -78,45 +197,44 @@ async def test_meta_new_lead_creates_freshsales_lead() -> None:
                     return Response(200, json={"contacts": []})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
-                    created_payload.update(json.loads(request.content))
-                    return Response(200, json={"contact": {"id": "lead-new"}})
+                    return Response(500, json={})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"search": 2, "create": 1}
-            assert created_payload["contact"]["email"] == "ada@example.com"  # type: ignore[index]
-            assert created_payload["contact"]["first_name"] == "Ada"  # type: ignore[index]
-            assert created_payload["contact"]["last_name"] == "Lovelace"  # type: ignore[index]
-            assert created_payload["contact"]["custom_field"][settings.freshsales_meta_lead_field] == "l-new"  # type: ignore[index]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
+            assert calls == {"search": settings.match_retry_attempts * 2, "create": 0}
+            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
 
 
 @pytest.mark.asyncio
-async def test_meta_duplicate_flow() -> None:
+async def test_meta_duplicate_flow_dead_letters_unmatched_lead_without_create() -> None:
+    settings = get_settings()
     body = meta_webhook_body("l1")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
-            calls = {"fresh_create": 0}
+            calls = {"search": 0, "fresh_create": 0}
 
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
                     return Response(200, json={"field_data": [{"name": "email", "values": ["a@example.com"]}]})
                 if request.url.path.endswith("/api/lookup"):
+                    calls["search"] += 1
                     return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["fresh_create"] += 1
-                    return Response(200, json={"contact": {"id": "lead1"}})
+                    return Response(500, json={})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls["fresh_create"] == 1
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
+            assert calls == {"search": settings.match_retry_attempts, "fresh_create": 0}
+            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
 
 
 @pytest.mark.asyncio
-async def test_meta_duplicate_mobile_create_safety_net_dead_letters_unresolved_duplicate() -> None:
+async def test_meta_duplicate_mobile_miss_dead_letters_without_create() -> None:
+    settings = get_settings()
     body = meta_webhook_body("l-mobile-race")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -142,18 +260,7 @@ async def test_meta_duplicate_mobile_create_safety_net_dead_letters_unresolved_d
                     return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
-                    return Response(
-                        400,
-                        json={
-                            "errors": {
-                                "code": 400,
-                                "message": [
-                                    "The mobile number already exists.",
-                                    'Mcr error {"error_code"=>3002, "errors"=>[{"object_type"=>"Contact", "object_id"=>"2090674640783768576", "field"=>"mobile_number", "code"=>3032, "message"=>"MobileNumber is not unique"}]}',
-                                ],
-                            }
-                        },
-                    )
+                    return Response(500, json={})
                 if request.url.path.endswith("/api/contacts/2090674640783768576") and request.method == "PUT":
                     calls["update"] += 1
                     return Response(200, json={})
@@ -161,7 +268,42 @@ async def test_meta_duplicate_mobile_create_safety_net_dead_letters_unresolved_d
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
-            assert calls == {"create": 1, "search": 2, "update": 0}
+            assert calls == {"create": 0, "search": settings.match_retry_attempts * 2, "update": 0}
+            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
+
+
+@pytest.mark.asyncio
+async def test_meta_match_with_backoff_retries_before_giving_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    body = meta_webhook_body("l-retry-miss")
+    transport = ASGITransport(app=app)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.matching.asyncio.sleep", no_sleep)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            calls = {"lookup": 0, "create": 0}
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "GET":
+                    return Response(200, json={"field_data": [{"name": "email", "values": ["retry@example.com"]}]})
+                if request.url.path.endswith("/api/lookup"):
+                    calls["lookup"] += 1
+                    return Response(200, json={"contacts": {"records": []}})
+                if request.url.path.endswith("/api/contacts") and request.method == "POST":
+                    calls["create"] += 1
+                    return Response(500, json={})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
+            assert calls["lookup"] == settings.match_retry_attempts
+            assert calls["lookup"] > 1
+            assert calls["create"] == 0
+            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
 
 
 @pytest.mark.asyncio
@@ -219,7 +361,7 @@ async def test_meta_phone_only_lead_updates_meta_id_without_create() -> None:
 
 
 @pytest.mark.asyncio
-async def test_meta_name_only_payload_creates_low_confidence_lead() -> None:
+async def test_meta_name_only_payload_dead_letters_without_create() -> None:
     body = meta_webhook_body("l-name")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -237,12 +379,13 @@ async def test_meta_name_only_payload_creates_low_confidence_lead() -> None:
                     return Response(200, json={"contacts": []})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
-                    return Response(200, json={"contact": {"id": "lead-name"}})
+                    return Response(500, json={})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"search": 0, "create": 1}
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
+            assert calls == {"search": 0, "create": 0}
+            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
 
 
 @pytest.mark.asyncio
