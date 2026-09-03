@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     meta_page_access_token: SecretStr
     meta_pixel_id: str = Field(min_length=1, max_length=128)
     meta_capi_access_token: SecretStr = Field(validation_alias=AliasChoices("META_CAPI_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN"))
-    meta_dataset_id: str = Field(validation_alias=AliasChoices("META_DATASET_ID", "META_PIXEL_ID"), min_length=1, max_length=128)
+    meta_dataset_id: str = Field(min_length=1, max_length=128)
     freshsales_domain: AnyHttpUrl
     freshsales_api_key: SecretStr
     freshsales_webhook_secret: SecretStr

@@ -48,7 +48,7 @@ class MetaCapiClient:
 
         async def op() -> dict[str, object]:
             response = await self.client.post(
-                f"https://graph.facebook.com/v20.0/{self.settings.meta_pixel_id}/events",
+                f"https://graph.facebook.com/v20.0/{self.settings.meta_dataset_id}/events",
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
