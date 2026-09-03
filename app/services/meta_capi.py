@@ -4,7 +4,10 @@ import time
 import httpx
 
 from app.config import Settings
+from app.logging_config import get_logger
 from app.retry import retry_async
+
+logger = get_logger(__name__)
 
 
 class MetaCapiClient:
@@ -52,6 +55,16 @@ class MetaCapiClient:
                 json=payload,
                 timeout=self.settings.http_timeout_seconds,
             )
+            if response.status_code >= 400:
+                try:
+                    error_body: object = response.json()
+                except ValueError:
+                    error_body = response.text
+                logger.warning(
+                    "meta_capi_response_error",
+                    status_code=response.status_code,
+                    meta_capi_error_body=error_body,
+                )
             response.raise_for_status()
             return response.json()
 
