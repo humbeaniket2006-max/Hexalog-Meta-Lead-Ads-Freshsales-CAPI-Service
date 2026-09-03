@@ -144,6 +144,28 @@ class FreshsalesClient:
 
         await retry_async(op, self.settings.max_http_attempts)
 
+    async def update_field(self, record_id: str, field_name: str, value: object, module: str = "contacts") -> None:
+        payload_key = module.rstrip("s")
+        payload = {payload_key: {"custom_field": {field_name: value}}}
+
+        async def op() -> None:
+            response = await self.client.put(
+                f"{self.base_url}/api/{module}/{record_id}",
+                headers=self.headers,
+                json=payload,
+                timeout=self.settings.http_timeout_seconds,
+            )
+            if response.status_code >= 400:
+                print(
+                    f"FRESHSALES_UPDATE_FIELD_ERROR status={response.status_code} "
+                    f"body={response.text} payload={payload}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            response.raise_for_status()
+
+        await retry_async(op, self.settings.max_http_attempts)
+
     def _with_meta_lead_id(self, lead_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
         payload = dict(lead_fields)
         custom_field = payload.get("custom_field")
