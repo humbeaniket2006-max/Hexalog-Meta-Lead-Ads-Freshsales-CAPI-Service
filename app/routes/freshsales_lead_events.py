@@ -36,9 +36,73 @@ class FreshsalesLeadEventPayload(BaseModel):
             missing = [field for field in ("deal_id", "meta_lead_id", "amount") if getattr(self, field) is None]
             if missing:
                 raise ValueError("deal_id, meta_lead_id, and amount are required for Conversion events")
-        if self.event_name == "DealCreated" and (not self.deal_id or not self.contact_id):
-            raise ValueError("deal_id and contact_id are required for DealCreated events")
+        if self.event_name == "DealCreated" and not self.deal_id:
+            raise ValueError("deal_id is required for DealCreated events")
         return self
+
+
+def first_linked_contact_id(deal_response: dict[str, object]) -> str | None:
+    containers = [deal_response]
+    deal = deal_response.get("deal")
+    if isinstance(deal, dict):
+        containers.insert(0, deal)
+
+    for container in containers:
+        for key in ("contacts", "deal_contacts"):
+            contact_id = _contact_id_from_contacts(container.get(key))
+            if contact_id:
+                return contact_id
+        contact_id = _string_or_int_id(container.get("contact_id"))
+        if contact_id:
+            return contact_id
+        contact_id = _first_id_from_list(container.get("contact_ids"))
+        if contact_id:
+            return contact_id
+    return None
+
+
+def _contact_id_from_contacts(value: object) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            contact_id = _contact_id_from_contact(item)
+            if contact_id:
+                return contact_id
+    if isinstance(value, dict):
+        records = value.get("records")
+        if isinstance(records, list):
+            return _contact_id_from_contacts(records)
+        return _contact_id_from_contact(value)
+    return None
+
+
+def _contact_id_from_contact(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    contact_id = _string_or_int_id(value.get("id"))
+    if contact_id:
+        return contact_id
+    nested = value.get("contact")
+    if isinstance(nested, dict):
+        return _string_or_int_id(nested.get("id"))
+    return None
+
+
+def _first_id_from_list(value: object) -> str | None:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        contact_id = _string_or_int_id(item)
+        if contact_id:
+            return contact_id
+    return None
+
+
+def _string_or_int_id(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, int):
+        return str(value)
+    return None
 
 
 @router.post("/lead-event")
@@ -65,17 +129,40 @@ async def receive_freshsales_lead_event(
     alerts = AlertService(settings, http_client)
 
     if payload.event_name == "DealCreated":
-        leadgen_id = await repo.get_leadgen_id_by_record_id(str(payload.contact_id))
+        freshsales = FreshsalesClient(settings, http_client)
+        try:
+            deal = await freshsales.get_deal(str(payload.deal_id))
+            contact_id = first_linked_contact_id(deal)
+        except Exception as exc:
+            await repo.dead_letter(
+                correlation_id,
+                "freshsales_lead_event",
+                payload.model_dump(),
+                type(exc).__name__,
+                settings.max_http_attempts,
+            )
+            await alerts.fire("Freshsales lead event deal stamp failed", {"correlation_id": correlation_id, "error": type(exc).__name__})
+            logger.error("freshsales_lead_event_flow_failed", correlation_id=correlation_id, error=type(exc).__name__)
+            return {"status": "ok"}
+
+        if not contact_id:
+            logger.warning(
+                "freshsales_deal_no_linked_contact",
+                correlation_id=correlation_id,
+                deal_id=payload.deal_id,
+            )
+            return {"status": "ok"}
+
+        leadgen_id = await repo.get_leadgen_id_by_record_id(contact_id)
         if not leadgen_id:
             logger.warning(
                 "freshsales_lead_event_no_match",
                 correlation_id=correlation_id,
                 event_name=payload.event_name,
-                contact_id=payload.contact_id,
+                contact_id=contact_id,
             )
             return {"status": "ok"}
 
-        freshsales = FreshsalesClient(settings, http_client)
         try:
             await freshsales.update_field(
                 record_id=str(payload.deal_id),

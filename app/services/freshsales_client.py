@@ -166,6 +166,19 @@ class FreshsalesClient:
 
         await retry_async(op, self.settings.max_http_attempts)
 
+    async def get_deal(self, deal_id: str) -> dict[str, object]:
+        async def op() -> dict[str, object]:
+            response = await self.client.get(
+                f"{self.base_url}/api/deals/{deal_id}",
+                headers=self.headers,
+                timeout=self.settings.http_timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+
+        return await retry_async(op, self.settings.max_http_attempts)
+
     def _with_meta_lead_id(self, lead_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
         payload = dict(lead_fields)
         custom_field = payload.get("custom_field")

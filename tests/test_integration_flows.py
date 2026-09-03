@@ -144,17 +144,20 @@ async def test_freshsales_lead_event_meta_capi_failure_dead_letters_and_returns_
 
 @pytest.mark.asyncio
 async def test_freshsales_lead_event_deal_created_with_match_stamps_deal_meta_lead_id() -> None:
-    body = {"event_name": "DealCreated", "contact_id": "contact-deal", "deal_id": "deal-created"}
+    body = {"event_name": "DealCreated", "deal_id": "deal-created"}
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
             async with app.state.sessionmaker() as session:
                 await Repository(session).save_lead_state("leadgen-deal-created", "contact-deal")
 
-            calls = {"update": 0, "capi": 0}
+            calls = {"get_deal": 0, "update": 0, "capi": 0}
             update_payload: dict[str, object] = {}
 
             async def handler(request):
+                if request.url.path.endswith("/api/deals/deal-created") and request.method == "GET":
+                    calls["get_deal"] += 1
+                    return Response(200, json={"deal": {"id": "deal-created", "contacts": [{"id": "contact-deal"}]}})
                 if request.url.path.endswith("/api/deals/deal-created") and request.method == "PUT":
                     calls["update"] += 1
                     update_payload.update(json.loads(request.content))
@@ -168,20 +171,32 @@ async def test_freshsales_lead_event_deal_created_with_match_stamps_deal_meta_le
             response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
 
             assert response.status_code == 200
-            assert calls == {"update": 1, "capi": 0}
+            assert calls == {"get_deal": 1, "update": 1, "capi": 0}
             assert update_payload == {"deal": {"custom_field": {"cf_meta_lead_id": "leadgen-deal-created"}}}
 
 
 @pytest.mark.asyncio
-async def test_freshsales_lead_event_deal_created_with_no_match_returns_ok_without_update() -> None:
-    body = {"event_name": "DealCreated", "contact_id": "missing-contact", "deal_id": "deal-no-match"}
+async def test_freshsales_lead_event_deal_created_with_no_contacts_returns_ok_without_lookup_or_update(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body = {"event_name": "DealCreated", "deal_id": "deal-no-contacts"}
     transport = ASGITransport(app=app)
+
+    async def fail_lookup(*_: object, **__: object) -> str | None:
+        raise AssertionError("leadgen lookup should not run without linked contacts")
+
+    monkeypatch.setattr(Repository, "get_leadgen_id_by_record_id", fail_lookup)
+
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
-            calls = {"update": 0, "capi": 0}
+            calls = {"get_deal": 0, "update": 0, "capi": 0}
 
             async def handler(request):
-                if request.url.path.endswith("/api/deals/deal-no-match") and request.method == "PUT":
+                if request.url.path.endswith("/api/deals/deal-no-contacts") and request.method == "GET":
+                    calls["get_deal"] += 1
+                    return Response(200, json={"deal": {"id": "deal-no-contacts", "contacts": []}})
+                if request.url.path.endswith("/api/deals/deal-no-contacts") and request.method == "PUT":
                     calls["update"] += 1
                     return Response(200, json={})
                 if "graph.facebook.com" in str(request.url) and request.method == "POST":
@@ -193,8 +208,40 @@ async def test_freshsales_lead_event_deal_created_with_no_match_returns_ok_witho
             response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
 
             assert response.status_code == 200
-            assert calls == {"update": 0, "capi": 0}
+            assert calls == {"get_deal": 1, "update": 0, "capi": 0}
             assert await dead_letter_errors() == []
+            assert "freshsales_deal_no_linked_contact" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_freshsales_lead_event_deal_created_with_contact_no_leadgen_returns_ok_without_update(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body = {"event_name": "DealCreated", "deal_id": "deal-orphan-contact"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            calls = {"get_deal": 0, "update": 0, "capi": 0}
+
+            async def handler(request):
+                if request.url.path.endswith("/api/deals/deal-orphan-contact") and request.method == "GET":
+                    calls["get_deal"] += 1
+                    return Response(200, json={"deal": {"id": "deal-orphan-contact", "contacts": [{"id": "orphan-contact"}]}})
+                if request.url.path.endswith("/api/deals/deal-orphan-contact") and request.method == "PUT":
+                    calls["update"] += 1
+                    return Response(200, json={})
+                if "graph.facebook.com" in str(request.url) and request.method == "POST":
+                    calls["capi"] += 1
+                    return Response(200, json={"events_received": 1})
+                return Response(200, json={})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+
+            assert response.status_code == 200
+            assert calls == {"get_deal": 1, "update": 0, "capi": 0}
+            assert await dead_letter_errors() == []
+            assert "freshsales_lead_event_no_match" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
