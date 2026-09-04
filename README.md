@@ -33,7 +33,7 @@ For Railway, the included `Procfile` respects `$PORT`.
 
 All secrets come from environment variables. Do not commit `.env`.
 
-- `DATABASE_URL`: async SQLAlchemy URL, for example `sqlite+aiosqlite:///./freshsales_capi.db` or PostgreSQL via `postgresql+asyncpg://...`. Render-managed `postgres://` and `postgresql://` URLs are normalized to `postgresql+asyncpg://` at startup.
+- `DATABASE_URL`: defaults to `sqlite+aiosqlite:///./freshsales_capi.db` when unset. PostgreSQL URLs using `postgres://` or `postgresql://` are normalized to `postgresql+asyncpg://` at startup. On Supabase free tier, use the Session Pooler connection string, for example `postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`; do not use the Direct connection or Transaction pooler. The Direct connection is IPv6-only on Supabase free tier, while Render outbound networking needs the IPv4-compatible Session Pooler on port 5432. Supabase SSL query params such as `sslmode=require` are stripped in `app/db/session.py` and passed to asyncpg via `connect_args`.
 - `META_VERIFY_TOKEN`
 - `META_APP_SECRET`
 - `META_PAGE_ACCESS_TOKEN`
