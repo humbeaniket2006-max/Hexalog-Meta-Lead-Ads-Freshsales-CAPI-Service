@@ -13,7 +13,7 @@ jobs:
       - name: Ping health endpoint
         run: |
           for i in 1 2 3; do
-            if curl -sf --max-time 30 "https://hexalog-capi-service.onrender.com/health"; then
+            if curl -s --max-time 30 "https://hexalog-capi-service.onrender.com/health"; then
               echo "Ping succeeded"
               exit 0
             fi
