@@ -6,6 +6,9 @@ import structlog
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level.upper())
+    # httpx logs full request URLs at INFO, which include Graph access tokens in the query string.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

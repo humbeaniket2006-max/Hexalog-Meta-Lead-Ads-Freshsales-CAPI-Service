@@ -1,4 +1,6 @@
 import json
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +41,34 @@ class Repository:
     async def mark_dedupe_failed(self, key: str) -> None:
         await self.session.execute(update(DedupeEvent).where(DedupeEvent.dedupe_key == key).values(status="failed"))
         await self.session.commit()
+
+    async def claim_for_replay(self, key: str) -> bool:
+        """Atomically move a failed/stuck event back to processing; False if someone else holds it."""
+        result = await self.session.execute(
+            update(DedupeEvent)
+            .where(DedupeEvent.dedupe_key == key, DedupeEvent.status.in_(("failed", "processing")))
+            .values(status="processing")
+        )
+        await self.session.commit()
+        return (result.rowcount or 0) > 0
+
+    async def replayable_meta_leads(
+        self, min_idle_seconds: int, max_age_hours: int, limit: int = 50
+    ) -> list[tuple[str, datetime, datetime]]:
+        """Dedupe keys of Meta leads that failed (or were abandoned mid-flight) and are still worth retrying."""
+        now = datetime.now(timezone.utc)
+        result = await self.session.execute(
+            select(DedupeEvent.dedupe_key, DedupeEvent.created_at, DedupeEvent.updated_at)
+            .where(
+                DedupeEvent.dedupe_key.like("meta_lead_capture:%"),
+                DedupeEvent.status.in_(("failed", "processing")),
+                DedupeEvent.updated_at < now - timedelta(seconds=min_idle_seconds),
+                DedupeEvent.created_at > now - timedelta(hours=max_age_hours),
+            )
+            .order_by(DedupeEvent.created_at)
+            .limit(limit)
+        )
+        return [(key, created, updated) for key, created, updated in result.all()]
 
     async def save_lead_state(self, leadgen_id: str, freshsales_record_id: str, record_type: str = "contact") -> None:
         stmt = insert(LeadState).values(

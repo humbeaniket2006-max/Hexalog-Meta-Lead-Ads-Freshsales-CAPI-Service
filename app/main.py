@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -9,6 +10,7 @@ from app.db.models import Base
 from app.db.repository import Repository
 from app.db.session import build_engine, build_sessionmaker
 from app.logging_config import configure_logging
+from app.replay import replay_loop
 from app.routes.freshsales_lead_events import router as freshsales_lead_events_router
 from app.security import InMemoryRateLimiter
 from app.webhooks.freshsales_status import router as freshsales_router
@@ -26,9 +28,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.sessionmaker = build_sessionmaker(engine)
     app.state.http_client = httpx.AsyncClient()
     app.state.rate_limiter = InMemoryRateLimiter(settings.rate_limit_per_minute)
+    app.state.lead_semaphore = asyncio.Semaphore(settings.lead_max_concurrency)
+    replay_task = (
+        asyncio.create_task(replay_loop(app.state, settings)) if settings.lead_replay_interval_seconds > 0 else None
+    )
     try:
         yield
     finally:
+        if replay_task:
+            replay_task.cancel()
+            await asyncio.gather(replay_task, return_exceptions=True)
         await app.state.http_client.aclose()
         await engine.dispose()
 

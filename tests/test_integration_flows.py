@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.db.models import DeadLetter
+from app.db.models import DeadLetter, DedupeEvent
 from app.db.repository import Repository
 from app.main import app
 from app.services.freshsales_client import FreshsalesClient
@@ -493,7 +493,7 @@ async def test_meta_name_only_payload_dead_letters_without_create() -> None:
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
             assert calls == {"search": 0, "create": 0}
             assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
 
@@ -545,3 +545,218 @@ async def test_freshsales_duplicate_flow() -> None:
             assert event["user_data"]["lead_id"] == "l1"  # type: ignore[index]
             assert event["user_data"]["em"] == [hashlib.sha256("ada@example.com".encode()).hexdigest()]  # type: ignore[index]
             assert event["user_data"]["ph"] == [hashlib.sha256("919307152210".encode()).hexdigest()]  # type: ignore[index]
+
+
+# --- Campaign context ---------------------------------------------------------
+
+CAMPAIGN_LEAD = {
+    "created_time": "2026-10-09T09:00:00+0000",
+    "form_id": "form-1",
+    "ad_id": "ad-1",
+    "ad_name": "Ad One",
+    "adset_id": "adset-1",
+    "adset_name": "Ad Set One",
+    "campaign_id": "camp-1",
+    "campaign_name": "Campaign One",
+    "field_data": [
+        {"name": "full_name", "values": ["Ada Lovelace"]},
+        {"name": "email", "values": ["ada@example.com"]},
+        {"name": "phone_number", "values": ["+919307152210"]},
+    ],
+}
+EXPECTED_CAMPAIGN_FIELDS = {
+    "cf_campaign_name": "Campaign One",
+    "cf_campaign_id": "camp-1",
+    "cf_ad_set": "Ad Set One",
+    "cf_ad_name": "Ad One",
+}
+
+
+async def post_meta_lead(leadgen_id: str, handler, inspect=None) -> int:
+    """POST a leadgen webhook; `inspect` (async) runs while the app and its in-memory DB are still alive."""
+    body = meta_webhook_body(leadgen_id)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            status_code = (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code
+            if inspect:
+                await inspect()
+            return status_code
+
+
+@pytest.mark.asyncio
+async def test_meta_lead_requests_campaign_fields_and_stamps_matched_contact() -> None:
+    puts: list[dict] = []
+    graph_params: list[dict] = []
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            graph_params.append(dict(request.url.params))
+            return Response(200, json=CAMPAIGN_LEAD)
+        if request.url.path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": "c1", "email": "ada@example.com"}]}})
+        if request.url.path.endswith("/api/contacts/c1") and request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return Response(200, json={})
+        return Response(200, json={})
+
+    async def inspect() -> None:
+        assert set(graph_params[0]["fields"].split(",")) >= {"field_data", "ad_name", "adset_name", "campaign_name", "campaign_id", "ad_id", "adset_id"}
+        assert puts == [{"contact": {"custom_field": {**EXPECTED_CAMPAIGN_FIELDS, "cf_meta_lead_id": "l-camp"}}}]
+        async with app.state.sessionmaker() as session:
+            assert await Repository(session).get_leadgen_id_by_record_id("c1") == "l-camp"
+
+    assert await post_meta_lead("l-camp", handler, inspect) == 200
+
+
+@pytest.mark.asyncio
+async def test_meta_lead_create_includes_campaign_fields() -> None:
+    created: list[dict] = []
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            return Response(200, json=CAMPAIGN_LEAD)
+        if request.url.path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": []}})
+        if request.url.path.endswith("/api/filtered_search/contact"):
+            return Response(200, json={"contacts": []})
+        if request.url.path.endswith("/api/contacts") and request.method == "POST":
+            created.append(json.loads(request.content))
+            return Response(200, json={"contact": {"id": "new-1"}})
+        return Response(200, json={})
+
+    assert await post_meta_lead("l-camp-create", handler) == 200
+    assert created[0]["contact"]["custom_field"] == {**EXPECTED_CAMPAIGN_FIELDS, "cf_meta_lead_id": "l-camp-create"}
+
+
+@pytest.mark.asyncio
+async def test_meta_graph_rejecting_extended_fields_falls_back_and_still_stamps_lead_id() -> None:
+    puts: list[dict] = []
+    graph_calls: list[dict] = []
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            graph_calls.append(dict(request.url.params))
+            if "fields" in request.url.params:
+                return Response(400, json={"error": {"code": 200, "message": "permission"}})
+            return Response(200, json={"field_data": CAMPAIGN_LEAD["field_data"]})
+        if request.url.path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": "c2", "email": "ada@example.com"}]}})
+        if request.url.path.endswith("/api/contacts/c2") and request.method == "PUT":
+            puts.append(json.loads(request.content))
+            return Response(200, json={})
+        return Response(200, json={})
+
+    async def inspect() -> None:
+        assert len(graph_calls) == 2 and "fields" not in graph_calls[1]
+        assert puts == [{"contact": {"custom_field": {"cf_meta_lead_id": "l-fallback"}}}]
+        assert await dead_letter_errors() == []
+
+    assert await post_meta_lead("l-fallback", handler, inspect) == 200
+
+
+@pytest.mark.asyncio
+async def test_meta_campaign_field_write_rejected_still_stamps_lead_id() -> None:
+    puts: list[dict] = []
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            return Response(200, json=CAMPAIGN_LEAD)
+        if request.url.path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": "c3", "email": "ada@example.com"}]}})
+        if request.url.path.endswith("/api/contacts/c3") and request.method == "PUT":
+            payload = json.loads(request.content)
+            puts.append(payload)
+            if "cf_campaign_name" in payload["contact"]["custom_field"]:
+                return Response(400, json={"errors": {"message": ["unknown custom field"]}})
+            return Response(200, json={})
+        return Response(200, json={})
+
+    async def inspect() -> None:
+        assert puts[-1] == {"contact": {"custom_field": {"cf_meta_lead_id": "l-badfield"}}}
+        assert await dead_letter_errors() == []
+        async with app.state.sessionmaker() as session:
+            assert await Repository(session).get_leadgen_id_by_record_id("c3") == "l-badfield"
+
+    assert await post_meta_lead("l-badfield", handler, inspect) == 200
+
+
+@pytest.mark.asyncio
+async def test_meta_graph_failure_returns_200_and_dead_letters_for_replay() -> None:
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            return Response(400, json={"error": {"code": 190, "message": "expired"}})
+        return Response(200, json={})
+
+    async def inspect() -> None:
+        assert await dead_letter_errors() == ["HTTPStatusError"]
+        async with app.state.sessionmaker() as session:
+            result = await session.execute(select(DedupeEvent.status).where(DedupeEvent.dedupe_key == "meta_lead_capture:l-expired"))
+            assert result.scalar_one() == "failed"
+
+    assert await post_meta_lead("l-expired", handler, inspect) == 200
+
+
+@pytest.mark.asyncio
+async def test_meta_duplicate_webhook_delivery_processes_lead_once() -> None:
+    puts: list[str] = []
+    body = meta_webhook_body("l-twice")
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            return Response(200, json=CAMPAIGN_LEAD)
+        if request.url.path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": "c4", "email": "ada@example.com"}]}})
+        if request.url.path.endswith("/api/contacts/c4") and request.method == "PUT":
+            puts.append("put")
+            return Response(200, json={})
+        return Response(200, json={})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            for _ in range(2):
+                assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+    assert puts == ["put"]
+
+
+@pytest.mark.asyncio
+async def test_failed_meta_lead_is_replayed_and_succeeds() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+
+    from app.replay import replay_once
+
+    state = {"graph_ok": False}
+    puts: list[str] = []
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url):
+            if not state["graph_ok"]:
+                return Response(400, json={"error": {"code": 190, "message": "expired"}})
+            return Response(200, json=CAMPAIGN_LEAD)
+        if request.url.path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": "c5", "email": "ada@example.com"}]}})
+        if request.url.path.endswith("/api/contacts/c5") and request.method == "PUT":
+            puts.append("put")
+            return Response(200, json={})
+        return Response(200, json={})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            body = meta_webhook_body("l-replay")
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+            assert puts == []
+            assert await replay_once(app.state, get_settings()) == 0  # too recent to replay
+            old = datetime.now(timezone.utc) - timedelta(hours=1)
+            async with app.state.sessionmaker() as session:
+                await session.execute(update(DedupeEvent).where(DedupeEvent.dedupe_key == "meta_lead_capture:l-replay").values(updated_at=old, created_at=old))
+                await session.commit()
+            state["graph_ok"] = True
+            assert await replay_once(app.state, get_settings()) == 1
+            async with app.state.sessionmaker() as session:
+                result = await session.execute(select(DedupeEvent.status).where(DedupeEvent.dedupe_key == "meta_lead_capture:l-replay"))
+                assert result.scalar_one() == "success"
+            assert puts == ["put"]

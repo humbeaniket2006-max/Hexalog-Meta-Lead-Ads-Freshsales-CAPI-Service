@@ -123,8 +123,14 @@ class FreshsalesClient:
 
         await retry_async(op, self.settings.max_http_attempts)
 
-    async def update_meta_lead_id(self, record_id: str, leadgen_id: str) -> None:
-        payload = {"contact": {"custom_field": {self.settings.freshsales_meta_lead_field: leadgen_id}}}
+    async def update_meta_lead_id(
+        self,
+        record_id: str,
+        leadgen_id: str,
+        extra_custom_fields: dict[str, str] | None = None,
+    ) -> None:
+        custom_field: dict[str, str] = {**(extra_custom_fields or {}), self.settings.freshsales_meta_lead_field: leadgen_id}
+        payload = {"contact": {"custom_field": custom_field}}
 
         async def op() -> None:
             response = await self.client.put(

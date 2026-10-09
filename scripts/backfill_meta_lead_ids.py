@@ -4,7 +4,7 @@ Dry run by default: fetches each failed lead from Meta and looks the contact up
 in Freshsales, but writes nothing. Pass --apply to stamp/create contacts and
 record lead_states in the database.
 
-Usage: python -m scripts.backfill_meta_lead_ids [--apply] [--limit N]
+Usage: python -m scripts.backfill_meta_lead_ids [--apply] [--stamp-only] [--limit N]
 """
 
 import argparse
@@ -24,11 +24,11 @@ from app.webhooks.meta_lead_capture import build_freshsales_contact_fields, extr
 PREFIX = "meta_lead_capture:"
 
 
-async def main(apply: bool, limit: int | None) -> None:
+async def main(apply: bool, limit: int | None, stamp_only: bool) -> None:
     settings = get_settings()
     engine = build_engine(settings)
     sessionmaker = build_sessionmaker(engine)
-    counts = {"matched": 0, "created": 0, "no_contact_data": 0, "error": 0}
+    counts = {"matched": 0, "created": 0, "no_contact_data": 0, "skipped": 0, "error": 0}
     async with httpx.AsyncClient() as http, sessionmaker() as session:
         repo = Repository(session)
         graph = MetaGraphClient(settings, http)
@@ -54,6 +54,10 @@ async def main(apply: bool, limit: int | None) -> None:
                 if contact is not None:
                     record_id, action = str(contact.get("id", "")), "stamp existing contact"
                 else:
+                    if stamp_only:
+                        counts["skipped"] += 1
+                        print(f"{leadgen_id}: SKIP no existing contact (--stamp-only)")
+                        continue
                     record_id, action = "", "create contact"
                 print(f"{leadgen_id}: {action} {record_id}".rstrip())
                 if not apply:
@@ -89,5 +93,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--stamp-only", action="store_true", help="only stamp existing contacts, never create")
     args = parser.parse_args()
-    asyncio.run(main(args.apply, args.limit))
+    asyncio.run(main(args.apply, args.limit, args.stamp_only))

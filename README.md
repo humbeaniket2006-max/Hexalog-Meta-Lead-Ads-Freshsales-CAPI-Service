@@ -4,7 +4,7 @@ Production FastAPI service replacing the LeadsBridge-style connector between Met
 
 ## Flows
 
-- Meta Lead Ads webhook captures `leadgen_id`, fetches the full lead payload from Meta Graph API, searches Freshsales by email then phone, and stamps the configured Freshsales custom field with the Meta `leadgen_id` on the matching contact.
+- Meta Lead Ads webhook captures `leadgen_id` and returns 200 immediately. A background task fetches the lead (with campaign context) from the Meta Graph API, searches Freshsales by email then phone, and stamps the Meta `leadgen_id` plus campaign fields on the matching contact. If no contact exists after the match retries, the service creates it. Leads that fail are retried by a replay loop (see Campaign context).
 - Freshsales status webhook validates a shared secret, confirms the record exists in local state, fetches the full Freshsales record, maps the status to a Meta CRM CAPI event, and sends it with `lead_id`.
 - Freshsales lead-event webhook validates `X-Internal-Secret`, resolves contact events through local lead state, and sends Qualified, NotQualified, or Conversion events to Meta CAPI.
 
@@ -43,7 +43,10 @@ All secrets come from environment variables. Do not commit `.env`.
 - `FRESHSALES_DOMAIN`: full Freshsales URL including `https://`, for example `https://yourdomain.myfreshworks.com` or `https://yourdomain.myfreshworks.com/crm/sales`
 - `FRESHSALES_API_KEY`
 - `FRESHSALES_WEBHOOK_SECRET`
-- `FRESHSALES_META_LEAD_FIELD`
+- `FRESHSALES_META_LEAD_FIELD`: internal name of the Meta lead id field, default `cf_meta_lead_id`
+- `FRESHSALES_CAMPAIGN_NAME_FIELD`, `FRESHSALES_CAMPAIGN_ID_FIELD`, `FRESHSALES_AD_SET_FIELD`, `FRESHSALES_AD_NAME_FIELD`: internal names of the campaign fields, defaults `cf_campaign_name`, `cf_campaign_id`, `cf_ad_set`, `cf_ad_name`
+- `META_GRAPH_VERSION`: Graph API version for lead fetches and CAPI events, default `v20.0`. Check the [changelog](https://developers.facebook.com/docs/graph-api/changelog) and bump it deliberately.
+- `LEAD_REPLAY_INTERVAL_SECONDS` (default 300, `0` disables), `LEAD_REPLAY_MAX_AGE_HOURS` (default 48), `LEAD_MAX_CONCURRENCY` (default 10)
 - `SLACK_WEBHOOK_URL`
 - `ALERT_CHANNEL`: `slack` or `none`
 - `MAX_HTTP_ATTEMPTS`
@@ -54,6 +57,36 @@ All secrets come from environment variables. Do not commit `.env`.
 - `DEBUG_LOG_PII`: defaults false
 
 Use a least-privilege Freshsales token with only lead search, lead create, lead update, deal/lead read, and custom field write permissions needed by the enabled flows.
+
+## Campaign context
+
+Every Meta lead stamped into Freshsales carries `campaign_name`, `campaign_id`, `adset_name`, `ad_name` and the Meta lead id.
+
+**Required Freshsales contact custom fields** (single-line text; Admin Settings → Field Settings → Contacts). Internal names must match the env vars above:
+
+| Label | Internal name |
+|---|---|
+| Campaign Name | `cf_campaign_name` |
+| Campaign ID | `cf_campaign_id` |
+| Ad Set | `cf_ad_set` |
+| Ad Name | `cf_ad_name` |
+| Meta Lead ID | `cf_meta_lead_id` |
+
+**Behaviour**
+- The webhook acknowledges immediately; processing runs in a background task (bounded by `LEAD_MAX_CONCURRENCY`).
+- Duplicate deliveries are skipped through the `dedupe_events` table keyed by `leadgen_id`.
+- If Meta rejects the extended field list, the lead is fetched with default fields and still stamped with its lead id (`campaign_fields_missing` is logged). If Freshsales rejects the campaign fields (for example a field does not exist), the lead id is still written (`campaign_fields_write_failed`).
+- Failed leads are recorded in `dead_letters` and marked `failed`. A replay loop in the app retries failed or abandoned leads, backing off as they age, until `LEAD_REPLAY_MAX_AGE_HOURS`. Meta no longer retries these itself because the webhook returns 200.
+- Meta rate-limit errors (codes 4, 17, 32, 613) are retried with backoff. Token or permission errors (190, 200, 10) fail the lead into the replay loop and are logged.
+- Logs contain `leadgen_id`, `campaign_id` and the Freshsales record id, never tokens or raw contact details. `httpx` request logging is set to WARNING because Graph URLs carry the access token.
+
+**Required Meta permissions** (verify against the [Lead Retrieval docs](https://developers.facebook.com/docs/marketing-api/guides/lead-ads/retrieving)): `leads_retrieval`, `pages_show_list`, `pages_read_engagement`, `pages_manage_metadata` (to subscribe the Page to `leadgen`), and `ads_read` or `ads_management` for campaign, ad set and ad names. Run the read-only diagnostic to check what the deployed token actually has:
+
+```bash
+python3 -m scripts.check_meta_setup --leadgen-id <real leadgen id> --page-id <page id>
+```
+
+The Page-level `leadgen` webhook subscription is set up manually in Meta, not by this service.
 
 ## Security Notes
 
@@ -71,4 +104,4 @@ python3 -m pytest -q
 python3 -m pip_audit -r requirements.txt --disable-pip --no-deps
 ```
 
-Current local result: `16 passed`; `No known vulnerabilities found`.
+Current local result: `34 passed`.

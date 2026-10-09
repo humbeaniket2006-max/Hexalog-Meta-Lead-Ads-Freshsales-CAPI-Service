@@ -69,8 +69,15 @@ class MetaLeadFieldData(BaseModel):
 
 
 class MetaGraphLeadPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str | None = Field(default=None, max_length=80)
     created_time: str | None = Field(default=None, max_length=80)
+    form_id: str | None = Field(default=None, max_length=80)
+    ad_id: str | None = Field(default=None, max_length=80)
+    ad_name: str | None = Field(default=None, max_length=400)
+    adset_id: str | None = Field(default=None, max_length=80)
+    adset_name: str | None = Field(default=None, max_length=400)
+    campaign_id: str | None = Field(default=None, max_length=80)
+    campaign_name: str | None = Field(default=None, max_length=400)
     field_data: list[MetaLeadFieldData] = Field(default_factory=list, max_length=100)

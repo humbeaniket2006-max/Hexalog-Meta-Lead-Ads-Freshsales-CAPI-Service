@@ -21,7 +21,15 @@ class Settings(BaseSettings):
     freshsales_domain: AnyHttpUrl
     freshsales_api_key: SecretStr
     freshsales_webhook_secret: SecretStr
-    freshsales_meta_lead_field: str = Field(default="meta_lead_id", min_length=1, max_length=80)
+    freshsales_meta_lead_field: str = Field(default="cf_meta_lead_id", min_length=1, max_length=80)
+    freshsales_campaign_name_field: str = Field(default="cf_campaign_name", min_length=1, max_length=80)
+    freshsales_campaign_id_field: str = Field(default="cf_campaign_id", min_length=1, max_length=80)
+    freshsales_ad_set_field: str = Field(default="cf_ad_set", min_length=1, max_length=80)
+    freshsales_ad_name_field: str = Field(default="cf_ad_name", min_length=1, max_length=80)
+    meta_graph_version: str = Field(default="v20.0", pattern=r"^v\d+\.\d+$")
+    lead_replay_interval_seconds: int = Field(default=300, ge=0, le=86400)
+    lead_replay_max_age_hours: int = Field(default=48, ge=1, le=720)
+    lead_max_concurrency: int = Field(default=10, ge=1, le=100)
     slack_webhook_url: SecretStr | None = None
     alert_channel: Literal["slack", "none"] = "slack"
     max_http_attempts: int = Field(default=3, ge=1, le=8)
