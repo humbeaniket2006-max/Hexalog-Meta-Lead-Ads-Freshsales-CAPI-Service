@@ -271,13 +271,14 @@ async def test_freshsales_filtered_search_returns_first_normalized_phone_match()
 
 
 @pytest.mark.asyncio
-async def test_meta_new_lead_dead_letters_when_no_freshsales_match() -> None:
+async def test_meta_new_lead_creates_contact_when_no_freshsales_match() -> None:
     settings = get_settings()
     body = meta_webhook_body("l-new")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
             calls = {"search": 0, "create": 0}
+            created_payloads: list[dict] = []
 
             async def handler(request):
                 if "graph.facebook.com" in str(request.url) and request.method == "GET":
@@ -299,17 +300,21 @@ async def test_meta_new_lead_dead_letters_when_no_freshsales_match() -> None:
                     return Response(200, json={"contacts": []})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
-                    return Response(500, json={})
+                    created_payloads.append(json.loads(request.content))
+                    return Response(200, json={"contact": {"id": "created-1"}})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
-            assert calls == {"search": settings.match_retry_attempts * 2, "create": 0}
-            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+            assert calls == {"search": settings.match_retry_attempts * 2, "create": 1}
+            assert created_payloads[0]["contact"]["custom_field"][settings.freshsales_meta_lead_field] == "l-new"
+            assert await dead_letter_errors() == []
+            async with app.state.sessionmaker() as session:
+                assert await Repository(session).get_leadgen_id_by_record_id("created-1") == "l-new"
 
 
 @pytest.mark.asyncio
-async def test_meta_duplicate_flow_dead_letters_unmatched_lead_without_create() -> None:
+async def test_meta_unmatched_email_lead_creates_contact() -> None:
     settings = get_settings()
     body = meta_webhook_body("l1")
     transport = ASGITransport(app=app)
@@ -325,17 +330,17 @@ async def test_meta_duplicate_flow_dead_letters_unmatched_lead_without_create() 
                     return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["fresh_create"] += 1
-                    return Response(500, json={})
+                    return Response(200, json={"contact": {"id": "created-2"}})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
-            assert calls == {"search": settings.match_retry_attempts, "fresh_create": 0}
-            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+            assert calls == {"search": settings.match_retry_attempts, "fresh_create": 1}
+            assert await dead_letter_errors() == []
 
 
 @pytest.mark.asyncio
-async def test_meta_duplicate_mobile_miss_dead_letters_without_create() -> None:
+async def test_meta_duplicate_mobile_on_create_updates_existing_contact() -> None:
     settings = get_settings()
     body = meta_webhook_body("l-mobile-race")
     transport = ASGITransport(app=app)
@@ -362,16 +367,19 @@ async def test_meta_duplicate_mobile_miss_dead_letters_without_create() -> None:
                     return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
-                    return Response(500, json={})
+                    return Response(
+                        400,
+                        json={"errors": {"message": ['MobileNumber is not unique {"object_id"=>"2090674640783768576"}']}},
+                    )
                 if request.url.path.endswith("/api/contacts/2090674640783768576") and request.method == "PUT":
                     calls["update"] += 1
                     return Response(200, json={})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
-            assert calls == {"create": 0, "search": settings.match_retry_attempts * 2, "update": 0}
-            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
+            assert calls == {"create": 1, "search": settings.match_retry_attempts * 2, "update": 1}
+            assert await dead_letter_errors() == []
 
 
 @pytest.mark.asyncio
@@ -397,15 +405,15 @@ async def test_meta_match_with_backoff_retries_before_giving_up(monkeypatch: pyt
                     return Response(200, json={"contacts": {"records": []}})
                 if request.url.path.endswith("/api/contacts") and request.method == "POST":
                     calls["create"] += 1
-                    return Response(500, json={})
+                    return Response(200, json={"contact": {"id": "created-3"}})
                 return Response(200, json={})
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
-            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 502
+            assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
             assert calls["lookup"] == settings.match_retry_attempts
             assert calls["lookup"] > 1
-            assert calls["create"] == 0
-            assert await dead_letter_errors() == ["FreshsalesContactCreateError"]
+            assert calls["create"] == 1
+            assert await dead_letter_errors() == []
 
 
 @pytest.mark.asyncio
