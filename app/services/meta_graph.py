@@ -1,3 +1,5 @@
+import json
+
 import httpx
 from pydantic import ValidationError
 
@@ -60,3 +62,68 @@ class MetaGraphClient:
                 raise ValueError("invalid Meta lead payload") from exc
 
         return await retry_async(op, self.settings.max_http_attempts, is_retryable=is_rate_limited)
+
+    async def _get_json(self, path: str, params: dict[str, str], token: str | None = None) -> dict[str, object]:
+        params = {**params, "access_token": token or self.settings.meta_page_access_token.get_secret_value()}
+
+        async def op() -> dict[str, object]:
+            response = await self.client.get(
+                f"https://graph.facebook.com/{self.settings.meta_graph_version}/{path}",
+                params=params,
+                timeout=self.settings.http_timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+
+        return await retry_async(op, self.settings.max_http_attempts, is_retryable=is_rate_limited)
+
+    async def _paged_ids(
+        self, path: str, params: dict[str, str], token: str | None = None, max_pages: int = 20
+    ) -> list[str]:
+        ids: list[str] = []
+        after: str | None = None
+        for _ in range(max_pages):
+            page_params = {**params, **({"after": after} if after else {})}
+            data = await self._get_json(path, page_params, token)
+            items = data.get("data")
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("id"), str):
+                    ids.append(item["id"])
+            paging = data.get("paging")
+            cursors = paging.get("cursors") if isinstance(paging, dict) else None
+            has_next = isinstance(paging, dict) and bool(paging.get("next"))
+            after = cursors.get("after") if has_next and isinstance(cursors, dict) else None
+            if not after:
+                break
+        return ids
+
+    async def resolve_page(self) -> tuple[str, str | None]:
+        """Return (page_id, page_access_token). System user tokens need me/accounts; Page tokens answer /me."""
+        wanted = self.settings.meta_page_id
+        try:
+            data = await self._get_json("me/accounts", {"fields": "id,access_token", "limit": "100"})
+            pages = [p for p in data.get("data", []) if isinstance(p, dict) and isinstance(p.get("id"), str)]  # type: ignore[union-attr]
+        except httpx.HTTPStatusError:
+            pages = []
+        if wanted:
+            for page in pages:
+                if page["id"] == wanted:
+                    return wanted, page.get("access_token")
+            return wanted, None
+        if len(pages) == 1:
+            return pages[0]["id"], pages[0].get("access_token")
+        if pages:
+            raise ValueError("token can access several Pages; set META_PAGE_ID")
+        data = await self._get_json("me", {"fields": "id"})
+        page_id = data.get("id")
+        if not isinstance(page_id, str) or not page_id:
+            raise ValueError("could not resolve Meta page id; set META_PAGE_ID")
+        return page_id, None
+
+    async def list_form_ids(self, page_id: str, page_token: str | None = None) -> list[str]:
+        return await self._paged_ids(f"{page_id}/leadgen_forms", {"fields": "id", "limit": "100"}, page_token)
+
+    async def list_lead_ids_since(self, form_id: str, since_unix: int) -> list[str]:
+        filtering = json.dumps([{"field": "time_created", "operator": "GREATER_THAN", "value": since_unix}])
+        return await self._paged_ids(f"{form_id}/leads", {"fields": "id", "limit": "100", "filtering": filtering})

@@ -46,6 +46,8 @@ All secrets come from environment variables. Do not commit `.env`.
 - `FRESHSALES_META_LEAD_FIELD`: internal name of the Meta lead id field, default `cf_meta_lead_id`
 - `FRESHSALES_CAMPAIGN_NAME_FIELD`, `FRESHSALES_CAMPAIGN_ID_FIELD`, `FRESHSALES_AD_SET_FIELD`, `FRESHSALES_AD_NAME_FIELD`: internal names of the campaign fields, defaults `cf_campaign_name`, `cf_campaign_id`, `cf_ad_set`, `cf_ad_name`
 - `META_GRAPH_VERSION`: Graph API version for lead fetches and CAPI events, default `v20.0`. Check the [changelog](https://developers.facebook.com/docs/graph-api/changelog) and bump it deliberately.
+- `META_PAGE_ID`: optional; needed only if the token can access more than one Page
+- `LEAD_RECONCILE_INTERVAL_SECONDS` (default 900, `0` disables), `LEAD_RECONCILE_LOOKBACK_HOURS` (default 48), `LEAD_RECONCILE_STARTUP_DELAY_SECONDS` (default 15)
 - `LEAD_REPLAY_INTERVAL_SECONDS` (default 300, `0` disables), `LEAD_REPLAY_MAX_AGE_HOURS` (default 48), `LEAD_MAX_CONCURRENCY` (default 10)
 - `SLACK_WEBHOOK_URL`
 - `ALERT_CHANNEL`: `slack` or `none`
@@ -88,6 +90,16 @@ python3 -m scripts.check_meta_setup --leadgen-id <real leadgen id> --page-id <pa
 
 The Page-level `leadgen` webhook subscription is set up manually in Meta, not by this service.
 
+## Keeping the free tier awake, and catching up after downtime
+
+Render's free tier sleeps after about 15 minutes without traffic, and a request to a sleeping instance can time out on Meta's side. Two layers cover this:
+
+**1. Wake it up.** A sleeping service cannot wake itself, so an external pinger is needed. `.github/workflows/keep-alive.yml` pings `/health` every 5 minutes with patient retries, but GitHub's scheduler is best-effort and can skip runs. Add an independent monitor as a second pinger (for example UptimeRobot or cron-job.org, whose free plans typically allow a 5-minute interval; check their current limits), pointed at `https://<your-service>.onrender.com/health`. A monitor that alerts you when the service is down also tells you early.
+
+**2. Catch up after waking.** A reconcile job runs about 15 seconds after every startup (so right after a wake-up), then every `LEAD_RECONCILE_INTERVAL_SECONDS`. It lists the Page's lead forms, asks Meta for each form's leads from the last `LEAD_RECONCILE_LOOKBACK_HOURS`, and processes any lead id the service has never seen: the same flow as the webhook, so each recovered lead gets its Meta lead id and campaign, ad set and ad fields. Leads that failed earlier are left to the replay loop. If the service was down for longer than the lookback window, raise `LEAD_RECONCILE_LOOKBACK_HOURS` (up to 168) and restart; the job is safe to rerun because of dedupe. Look for `meta_lead_reconciled` and `meta_lead_reconcile_done` in the logs.
+
+The reconcile job needs a token that can read the Page's leads. With a system user token the Page is discovered through `me/accounts`; set `META_PAGE_ID` if the token can reach several Pages.
+
 ## Security Notes
 
 - Meta setup verification uses the `hub.challenge` handshake.
@@ -104,4 +116,4 @@ python3 -m pytest -q
 python3 -m pip_audit -r requirements.txt --disable-pip --no-deps
 ```
 
-Current local result: `34 passed`.
+Current local result: `36 passed`.

@@ -760,3 +760,96 @@ async def test_failed_meta_lead_is_replayed_and_succeeds() -> None:
                 result = await session.execute(select(DedupeEvent.status).where(DedupeEvent.dedupe_key == "meta_lead_capture:l-replay"))
                 assert result.scalar_one() == "success"
             assert puts == ["put"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_leads_the_webhook_never_delivered() -> None:
+    from app.replay import reconcile_missing_leads
+
+    puts: list[str] = []
+    list_calls: list[dict] = []
+
+    async def handler(request):
+        url = str(request.url)
+        path = request.url.path
+        if "graph.facebook.com" in url:
+            if path.endswith("/me/accounts"):
+                return Response(200, json={"data": [{"id": "page-1", "access_token": "PAGE_TOKEN"}]})
+            if path.endswith("/page-1/leadgen_forms"):
+                assert request.url.params["access_token"] == "PAGE_TOKEN"
+                return Response(200, json={"data": [{"id": "form-1"}]})
+            if path.endswith("/form-1/leads"):
+                list_calls.append(dict(request.url.params))
+                if "after" not in request.url.params:
+                    return Response(200, json={"data": [{"id": "l-known"}, {"id": "l-missed"}], "paging": {"cursors": {"after": "c1"}, "next": "x"}})
+                return Response(200, json={"data": [{"id": "l-missed-2"}], "paging": {"cursors": {"after": "c2"}}})
+            return Response(200, json=CAMPAIGN_LEAD)
+        if path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": "c9", "email": "ada@example.com"}]}})
+        if path.endswith("/api/contacts/c9") and request.method == "PUT":
+            puts.append(json.loads(request.content)["contact"]["custom_field"]["cf_meta_lead_id"])
+            return Response(200, json={})
+        return Response(200, json={})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test"):
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            async with app.state.sessionmaker() as session:
+                repo = Repository(session)
+                await repo.acquire_dedupe("meta_lead_capture:l-known")
+                await repo.mark_dedupe_success("meta_lead_capture:l-known")
+            assert await reconcile_missing_leads(app.state, get_settings()) == 2
+            assert sorted(puts) == ["l-missed", "l-missed-2"]
+            assert "filtering" in list_calls[0] and "time_created" in list_calls[0]["filtering"]
+            # A second pass finds nothing new.
+            assert await reconcile_missing_leads(app.state, get_settings()) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_leaves_failed_leads_to_the_replay_loop() -> None:
+    from app.replay import reconcile_missing_leads
+
+    async def handler(request):
+        path = request.url.path
+        if path.endswith("/me/accounts"):
+            return Response(200, json={"data": [{"id": "page-1", "access_token": "T"}]})
+        if path.endswith("/leadgen_forms"):
+            return Response(200, json={"data": [{"id": "form-1"}]})
+        if path.endswith("/form-1/leads"):
+            return Response(200, json={"data": [{"id": "l-failed"}]})
+        return Response(200, json={})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test"):
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            async with app.state.sessionmaker() as session:
+                repo = Repository(session)
+                await repo.acquire_dedupe("meta_lead_capture:l-failed")
+                await repo.mark_dedupe_failed("meta_lead_capture:l-failed")
+            assert await reconcile_missing_leads(app.state, get_settings()) == 0
+
+
+@pytest.mark.asyncio
+async def test_lead_event_for_contact_with_several_leads_uses_the_latest_leadgen_id() -> None:
+    body = {"event_name": "Qualified", "contact_id": "contact-repeat"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            async with app.state.sessionmaker() as session:
+                repo = Repository(session)
+                await repo.save_lead_state("leadgen-first", "contact-repeat")
+                await repo.save_lead_state("leadgen-second", "contact-repeat")
+                assert await repo.has_record("contact-repeat", "contact")
+                assert await repo.get_leadgen_id_by_record_id("contact-repeat") == "leadgen-second"
+
+            sent: list[dict] = []
+
+            async def handler(request):
+                if "graph.facebook.com" in str(request.url) and request.method == "POST":
+                    sent.append(json.loads(request.content))
+                return Response(200, json={"events_received": 1})
+
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+
+            assert response.status_code == 200
+            assert [event["user_data"] for payload in sent for event in payload["data"]] == [{"lead_id": "leadgen-second"}]

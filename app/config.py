@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     meta_graph_version: str = Field(default="v20.0", pattern=r"^v\d+\.\d+$")
     lead_replay_interval_seconds: int = Field(default=300, ge=0, le=86400)
     lead_replay_max_age_hours: int = Field(default=48, ge=1, le=720)
+    meta_page_id: str | None = None
+    lead_reconcile_interval_seconds: int = Field(default=900, ge=0, le=86400)
+    lead_reconcile_lookback_hours: int = Field(default=48, ge=1, le=168)
+    lead_reconcile_startup_delay_seconds: int = Field(default=15, ge=0, le=600)
     lead_max_concurrency: int = Field(default=10, ge=1, le=100)
     slack_webhook_url: SecretStr | None = None
     alert_channel: Literal["slack", "none"] = "slack"

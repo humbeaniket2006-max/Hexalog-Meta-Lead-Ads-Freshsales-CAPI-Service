@@ -34,6 +34,16 @@ class Repository:
             await self.session.commit()
             return True
 
+    async def acquire_dedupe_if_new(self, key: str) -> bool:
+        """Claim a key only if it has never been seen; failed/stuck keys are left to the replay loop."""
+        try:
+            await self.session.execute(insert(DedupeEvent).values(dedupe_key=key, status="processing"))
+            await self.session.commit()
+            return True
+        except IntegrityError:
+            await self.session.rollback()
+            return False
+
     async def mark_dedupe_success(self, key: str) -> None:
         await self.session.execute(update(DedupeEvent).where(DedupeEvent.dedupe_key == key).values(status="success"))
         await self.session.commit()
@@ -82,14 +92,20 @@ class Repository:
         await self.session.commit()
 
     async def get_leadgen_id_by_record_id(self, record_id: str, record_type: str = "contact") -> str | None:
+        # A contact can have several leads (repeat submissions); the most recent one wins.
         result = await self.session.execute(
-            select(LeadState.leadgen_id).where(LeadState.freshsales_record_id == record_id, LeadState.record_type == record_type)
+            select(LeadState.leadgen_id)
+            .where(LeadState.freshsales_record_id == record_id, LeadState.record_type == record_type)
+            .order_by(LeadState.created_at.desc(), LeadState.id.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
     async def has_record(self, record_id: str, record_type: str) -> bool:
         result = await self.session.execute(
-            select(LeadState.id).where(LeadState.freshsales_record_id == record_id, LeadState.record_type == record_type)
+            select(LeadState.id)
+            .where(LeadState.freshsales_record_id == record_id, LeadState.record_type == record_type)
+            .limit(1)
         )
         return result.scalar_one_or_none() is not None
 
