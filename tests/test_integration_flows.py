@@ -306,7 +306,7 @@ async def test_meta_new_lead_creates_contact_when_no_freshsales_match() -> None:
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"search": settings.match_retry_attempts * 2, "create": 1}
+            assert calls == {"search": settings.match_retry_attempts * 3, "create": 1}
             assert created_payloads[0]["contact"]["custom_field"][settings.freshsales_meta_lead_field] == "l-new"
             assert await dead_letter_errors() == []
             async with app.state.sessionmaker() as session:
@@ -378,7 +378,7 @@ async def test_meta_duplicate_mobile_on_create_updates_existing_contact() -> Non
 
             app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
             assert (await client.post("/webhooks/meta/leadgen", content=body, headers={"X-Hub-Signature-256": sign(body)})).status_code == 200
-            assert calls == {"create": 1, "search": settings.match_retry_attempts * 2, "update": 1}
+            assert calls == {"create": 1, "search": settings.match_retry_attempts * 3, "update": 1}
             assert await dead_letter_errors() == []
 
 
@@ -853,3 +853,92 @@ async def test_lead_event_for_contact_with_several_leads_uses_the_latest_leadgen
 
             assert response.status_code == 200
             assert [event["user_data"] for payload in sent for event in payload["data"]] == [{"lead_id": "leadgen-second"}]
+
+
+@pytest.mark.asyncio
+async def test_link_duplicate_contacts_stamps_native_duplicate_but_not_strangers_or_existing_ids() -> None:
+    from app.replay import link_duplicate_contacts
+
+    puts: dict[str, dict] = {}
+    contacts = {
+        "c-stamped": {"id": "c-stamped", "email": "ada@example.com", "custom_field": {"cf_meta_lead_id": "l-link"}},
+        "c-dup": {"id": "c-dup", "email": "ADA@example.com", "mobile_number": "+91 93071 52210", "custom_field": {}},
+        "c-stranger": {"id": "c-stranger", "email": "someone.else@example.com", "custom_field": {}},
+        "c-other-lead": {"id": "c-other-lead", "email": "ada@example.com", "custom_field": {"cf_meta_lead_id": "l-other"}},
+    }
+
+    async def handler(request):
+        path = request.url.path
+        if "graph.facebook.com" in str(request.url):
+            return Response(200, json=CAMPAIGN_LEAD)
+        if path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": [{"id": cid} for cid in contacts]}})
+        if path.endswith("/api/filtered_search/contact"):
+            return Response(200, json={"contacts": []})
+        for cid in contacts:
+            if path.endswith(f"/api/contacts/{cid}"):
+                if request.method == "PUT":
+                    puts[cid] = json.loads(request.content)["contact"]["custom_field"]
+                    return Response(200, json={})
+                return Response(200, json={"contact": contacts[cid]})
+        return Response(200, json={})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test"):
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            async with app.state.sessionmaker() as session:
+                await Repository(session).save_lead_state("l-link", "c-stamped")
+            assert await link_duplicate_contacts(app.state, get_settings()) == 1
+            assert puts == {"c-dup": {**EXPECTED_CAMPAIGN_FIELDS, "cf_meta_lead_id": "l-link"}}
+
+
+@pytest.mark.asyncio
+async def test_lead_event_falls_back_to_lead_id_stored_on_the_freshsales_contact() -> None:
+    body = {"event_name": "NotQualified", "contact_id": "contact-native"}
+    sent: list[dict] = []
+
+    async def handler(request):
+        if "graph.facebook.com" in str(request.url) and request.method == "POST":
+            sent.append(json.loads(request.content))
+            return Response(200, json={"events_received": 1})
+        if request.url.path.endswith("/api/contacts/contact-native"):
+            return Response(200, json={"contact": {"id": "contact-native", "custom_field": {"cf_meta_lead_id": "leadgen-on-contact"}}})
+        return Response(200, json={})
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            app.state.http_client._transport.handle_async_request = handler  # type: ignore[attr-defined,method-assign]
+            response = await client.post("/webhooks/freshsales/lead-event", json=body, headers={"X-Internal-Secret": "freshsecret"})
+            assert response.status_code == 200
+            assert [e["user_data"] for p in sent for e in p["data"]] == [{"lead_id": "leadgen-on-contact"}]
+
+
+@pytest.mark.asyncio
+async def test_meta_lead_matches_contact_the_lookup_index_cannot_see() -> None:
+    """Freshsales /api/lookup can return nothing for contacts that exist; the filter API must still find them."""
+    puts: list[str] = []
+    creates: list[str] = []
+
+    async def handler(request):
+        path = request.url.path
+        if "graph.facebook.com" in str(request.url):
+            return Response(200, json=CAMPAIGN_LEAD)
+        if path.endswith("/api/lookup"):
+            return Response(200, json={"contacts": {"records": []}})
+        if path.endswith("/api/filtered_search/contact"):
+            rule = json.loads(request.content)["filter_rule"][0]
+            if rule["attribute"] == "contact_email.email":
+                return Response(200, json={"contacts": [{"id": "c-native", "email": "ada@example.com"}]})
+            return Response(200, json={"contacts": []})
+        if path.endswith("/api/contacts/c-native") and request.method == "PUT":
+            puts.append("put")
+            return Response(200, json={})
+        if path.endswith("/api/contacts") and request.method == "POST":
+            creates.append("create")
+            return Response(200, json={"contact": {"id": "dup"}})
+        return Response(200, json={})
+
+    async def inspect() -> None:
+        assert puts == ["put"] and creates == []
+
+    assert await post_meta_lead("l-index-miss", handler, inspect) == 200

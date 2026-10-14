@@ -29,6 +29,12 @@ class FreshsalesClient:
     async def search_contacts_by_field(self, field_name: str, value: str) -> list[dict[str, object]]:
         if field_name == "mobile_number":
             return await self._search_contacts_by_mobile_number(value)
+        if field_name == "email":
+            # /api/lookup is a search-index call and often misses contacts that exist; the filter API reads the
+            # database. Try it first and keep lookup as a fallback.
+            matches = await self._search_contacts_by_email_filter(value)
+            if matches:
+                return matches
 
         params = {"q": value, "f": "contacts", "entities": "contact"}
 
@@ -46,6 +52,34 @@ class FreshsalesClient:
 
         return await retry_async(op, self.settings.max_http_attempts)
 
+    async def _filtered_search_contacts(self, attribute: str, value: str) -> list[dict[str, object]]:
+        payload = {"filter_rule": [{"attribute": attribute, "operator": "is_in", "value": value}]}
+
+        async def op() -> list[dict[str, object]]:
+            response = await self.client.post(
+                f"{self.base_url}/api/filtered_search/contact",
+                headers=self.headers,
+                json=payload,
+                timeout=self.settings.http_timeout_seconds,
+            )
+            response.raise_for_status()
+            data = response.json()
+            contacts = data.get("contacts") if isinstance(data, dict) else []
+            return [contact for contact in contacts if isinstance(contact, dict)] if isinstance(contacts, list) else []
+
+        return await retry_async(op, self.settings.max_http_attempts)
+
+    async def _search_contacts_by_email_filter(self, email: str) -> list[dict[str, object]]:
+        candidates = [email.strip()]
+        if email.strip().lower() != email.strip():
+            candidates.append(email.strip().lower())
+        for candidate in candidates:
+            records = await self._filtered_search_contacts("contact_email.email", candidate)
+            matched = self._matching_contact_records(records, "email", email)
+            if matched:
+                return matched
+        return []
+
     async def find_contact_by_email_or_phone(self, email: str | None, phone: str | None) -> dict[str, object] | None:
         if email:
             email_matches = await self.search_contacts_by_field("email", email)
@@ -58,22 +92,8 @@ class FreshsalesClient:
         return None
 
     async def _search_contacts_by_mobile_number(self, value: str) -> list[dict[str, object]]:
-        payload = {"filter_rule": [{"attribute": "mobile_number", "operator": "is_in", "value": value}]}
-
-        async def op() -> list[dict[str, object]]:
-            response = await self.client.post(
-                f"{self.base_url}/api/filtered_search/contact",
-                headers=self.headers,
-                json=payload,
-                timeout=self.settings.http_timeout_seconds,
-            )
-            response.raise_for_status()
-            data = response.json()
-            contacts = data.get("contacts") if isinstance(data, dict) else []
-            records = [contact for contact in contacts if isinstance(contact, dict)] if isinstance(contacts, list) else []
-            return self._matching_contact_records(records, "mobile_number", value)
-
-        return await retry_async(op, self.settings.max_http_attempts)
+        records = await self._filtered_search_contacts("mobile_number", value)
+        return self._matching_contact_records(records, "mobile_number", value)
 
     async def create_contact(self, contact_fields: dict[str, object], leadgen_id: str) -> dict[str, object]:
         payload = {"contact": self._with_meta_lead_id(contact_fields, leadgen_id)}

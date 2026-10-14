@@ -46,6 +46,7 @@ All secrets come from environment variables. Do not commit `.env`.
 - `FRESHSALES_META_LEAD_FIELD`: internal name of the Meta lead id field, default `cf_meta_lead_id`
 - `FRESHSALES_CAMPAIGN_NAME_FIELD`, `FRESHSALES_CAMPAIGN_ID_FIELD`, `FRESHSALES_AD_SET_FIELD`, `FRESHSALES_AD_NAME_FIELD`: internal names of the campaign fields, defaults `cf_campaign_name`, `cf_campaign_id`, `cf_ad_set`, `cf_ad_name`
 - `META_GRAPH_VERSION`: Graph API version for lead fetches and CAPI events, default `v20.0`. Check the [changelog](https://developers.facebook.com/docs/graph-api/changelog) and bump it deliberately.
+- `LEAD_LINK_INTERVAL_SECONDS` (default 3600, `0` disables), `LEAD_LINK_LOOKBACK_HOURS` (default 72)
 - `META_PAGE_ID`: optional; needed only if the token can access more than one Page
 - `LEAD_RECONCILE_INTERVAL_SECONDS` (default 900, `0` disables), `LEAD_RECONCILE_LOOKBACK_HOURS` (default 48), `LEAD_RECONCILE_STARTUP_DELAY_SECONDS` (default 15)
 - `LEAD_REPLAY_INTERVAL_SECONDS` (default 300, `0` disables), `LEAD_REPLAY_MAX_AGE_HOURS` (default 48), `LEAD_MAX_CONCURRENCY` (default 10)
@@ -100,6 +101,13 @@ Render's free tier sleeps after about 15 minutes without traffic, and a request 
 
 The reconcile job needs a token that can read the Page's leads. With a system user token the Page is discovered through `me/accounts`; set `META_PAGE_ID` if the token can reach several Pages.
 
+## Duplicate contacts
+
+Freshsales' own Meta sync can create a second contact for the same person hours after a lead arrives (that contact usually carries the sales owner and `paid_meta` source). The service therefore:
+- searches contacts by email through the Freshsales **filter API** (`contact_email.email`) first and `/api/lookup` only as a fallback, because `/api/lookup` is search-index based and often returns nothing for contacts that exist;
+- runs a link job (about a minute after startup, then every `LEAD_LINK_INTERVAL_SECONDS`) that finds other contacts with the same email or mobile number as each recent lead and stamps them with the lead id and campaign fields. It only writes when the contact's lead id is empty and the email or mobile matches exactly, and never overwrites an existing lead id (`meta_lead_linked_duplicate_contact` in the logs);
+- when a Freshsales event arrives for a contact that has no local lead state, reads the lead id stored on the contact itself, so events reach Meta for any contact that carries the id.
+
 ## Security Notes
 
 - Meta setup verification uses the `hub.challenge` handshake.
@@ -116,4 +124,4 @@ python3 -m pytest -q
 python3 -m pip_audit -r requirements.txt --disable-pip --no-deps
 ```
 
-Current local result: `36 passed`.
+Current local result: `40 passed`.

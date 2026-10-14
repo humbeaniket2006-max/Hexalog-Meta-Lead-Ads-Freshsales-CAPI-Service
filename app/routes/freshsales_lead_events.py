@@ -105,6 +105,28 @@ def _string_or_int_id(value: object) -> str | None:
     return None
 
 
+async def resolve_leadgen_id(
+    repo: Repository,
+    freshsales: FreshsalesClient,
+    settings: Settings,
+    contact_id: str,
+    correlation_id: str,
+) -> str | None:
+    """Local lead state first; otherwise the lead id stored on the Freshsales contact itself."""
+    leadgen_id = await repo.get_leadgen_id_by_record_id(contact_id)
+    if leadgen_id:
+        return leadgen_id
+    try:
+        record = await freshsales.get_record("contact", contact_id)
+    except Exception as exc:
+        logger.warning("freshsales_contact_lookup_failed", correlation_id=correlation_id, contact_id=contact_id, error=type(exc).__name__)
+        return None
+    contact = record.get("contact", record) if isinstance(record, dict) else None
+    custom_field = contact.get("custom_field") if isinstance(contact, dict) else None
+    value = custom_field.get(settings.freshsales_meta_lead_field) if isinstance(custom_field, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 @router.post("/lead-event")
 async def receive_freshsales_lead_event(
     request: Request,
@@ -153,7 +175,7 @@ async def receive_freshsales_lead_event(
             )
             return {"status": "ok"}
 
-        leadgen_id = await repo.get_leadgen_id_by_record_id(contact_id)
+        leadgen_id = await resolve_leadgen_id(repo, freshsales, settings, contact_id, correlation_id)
         if not leadgen_id:
             logger.warning(
                 "freshsales_lead_event_no_match",
@@ -194,7 +216,9 @@ async def receive_freshsales_lead_event(
     if payload.event_name == "Conversion":
         leadgen_id = payload.meta_lead_id
     else:
-        leadgen_id = await repo.get_leadgen_id_by_record_id(str(payload.contact_id))
+        leadgen_id = await resolve_leadgen_id(
+            repo, FreshsalesClient(settings, http_client), settings, str(payload.contact_id), correlation_id
+        )
 
     if not leadgen_id:
         logger.warning(

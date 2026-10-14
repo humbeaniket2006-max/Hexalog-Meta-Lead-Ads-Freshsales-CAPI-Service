@@ -14,6 +14,7 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FRESHSALES_WEBHOOK_SECRET", "freshsecret")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("LEAD_RECONCILE_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("LEAD_LINK_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("MATCH_RETRY_MIN_SECONDS", "0.1")
     monkeypatch.setenv("MATCH_RETRY_MAX_SECONDS", "0.1")
     from app.config import get_settings

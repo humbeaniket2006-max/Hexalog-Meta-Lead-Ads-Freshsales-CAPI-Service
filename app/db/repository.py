@@ -101,6 +101,15 @@ class Repository:
         )
         return result.scalar_one_or_none()
 
+    async def recent_lead_states(self, hours: int, record_type: str = "contact") -> list[tuple[str, str]]:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        result = await self.session.execute(
+            select(LeadState.leadgen_id, LeadState.freshsales_record_id)
+            .where(LeadState.record_type == record_type, LeadState.created_at > cutoff)
+            .order_by(LeadState.created_at)
+        )
+        return [(leadgen_id, record_id) for leadgen_id, record_id in result.all()]
+
     async def has_record(self, record_id: str, record_type: str) -> bool:
         result = await self.session.execute(
             select(LeadState.id)
